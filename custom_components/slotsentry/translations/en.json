@@ -35,7 +35,7 @@
       },
       "confirm": {
         "title": "Review & Confirm",
-        "description": "Locks ({lock_count}): {lock_list} | Slots: {slot_count} | Code Length: {code_length_mode} — {code_lengths} | Keypad Lockout: {lockout_summary} | Secure Mode: {secure_mode} | Click Submit to finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
+        "description": "Locks ({lock_count}): {lock_list}\nSlots: {slot_count}\nCode Length: {code_length_mode} — {code_lengths}\nKeypad Lockout: {lockout_summary}\nSecure Mode: {secure_mode}\n\nClick Next to assign an area and finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
       }
     },
     "abort": {
