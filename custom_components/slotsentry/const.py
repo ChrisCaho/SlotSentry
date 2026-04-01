@@ -3,11 +3,13 @@
 Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
+Revision: 1.1
 """
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a2"
+VERSION = "2026.4.0a3"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 1

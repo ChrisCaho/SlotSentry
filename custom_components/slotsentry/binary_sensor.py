@@ -9,7 +9,7 @@ enabled.  The sensor is ON when the configured trigger entity equals the
 target state, and OFF otherwise.  State is updated reactively via
 async_track_state_change_event; no polling is performed.
 
-Revision: 1.1
+Revision: 1.2
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ class KeypadLockoutSensor(BinarySensorEntity):
     @property
     def icon(self) -> str:
         """Return an icon that conveys whether lockout is engaged."""
-        return "mdi:lock-off" if self.is_on else "mdi:lock-open"
+        return "mdi:shield-lock" if self.is_on else "mdi:shield-lock-open"
 
     # ------------------------------------------------------------------
     # Device info

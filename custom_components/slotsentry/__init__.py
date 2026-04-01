@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.2
+Revision: 1.3
 """
 
 from __future__ import annotations
@@ -117,8 +117,11 @@ async def async_unload_entry(
             await entry.runtime_data.slot_manager.async_shutdown()
 
         # Remove sidebar panel
-        async_remove_panel(hass, DOMAIN)
-        _LOGGER.debug("SlotSentry sidebar panel removed")
+        try:
+            async_remove_panel(hass, DOMAIN)
+            _LOGGER.debug("SlotSentry sidebar panel removed")
+        except Exception as err:
+            _LOGGER.error("Failed to remove sidebar panel: %s", err)
 
     return unload_ok
 
@@ -145,22 +148,30 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     registers the panel_custom entry.
     """
     # File I/O must run in the executor to avoid blocking the event loop.
-    await hass.async_add_executor_job(_copy_panel_js, hass)
+    try:
+        await hass.async_add_executor_job(_copy_panel_js, hass)
+    except Exception as err:
+        _LOGGER.error("Failed to copy panel JS: %s", err)
+        raise
 
-    async_register_built_in_panel(
-        hass,
-        component_name="custom",
-        sidebar_title="SlotSentry",
-        sidebar_icon="mdi:lock-smart",
-        frontend_url_path=DOMAIN,
-        config={
-            "_panel_custom": {
-                "name": "slotsentry-panel",
-                "embed_iframe": False,
-                "trust_external": False,
-                "js_url": "/local/slotsentry/slotsentry-panel.js",
-            }
-        },
-        require_admin=True,
-    )
+    try:
+        async_register_built_in_panel(
+            hass,
+            component_name="custom",
+            sidebar_title="SlotSentry",
+            sidebar_icon="mdi:lock-smart",
+            frontend_url_path=DOMAIN,
+            config={
+                "_panel_custom": {
+                    "name": "slotsentry-panel",
+                    "embed_iframe": False,
+                    "trust_external": False,
+                    "js_url": "/local/slotsentry/slotsentry-panel.js",
+                }
+            },
+            require_admin=True,
+        )
+    except Exception as err:
+        _LOGGER.error("Failed to register sidebar panel: %s", err)
+        raise
     _LOGGER.debug("SlotSentry sidebar panel registered")

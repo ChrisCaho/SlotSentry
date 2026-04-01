@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Welcome to SlotSentry",
-        "description": "SlotSentry gives you a single place to manage PIN codes across all your Z-Wave locks.\n\nThis wizard will discover your locks, configure code lengths, and optionally set up a keypad lockout trigger.\n\nSecure Mode can be enabled later via Reconfigure.",
+        "description": "SlotSentry gives you a single place to manage PIN codes across all your Z-Wave locks.\n\nThis wizard will discover your locks, configure code lengths, optionally set up a keypad lockout trigger, and choose whether to enable Secure Mode.",
         "data": {}
       },
       "locks": {
@@ -14,13 +14,25 @@
         }
       },
       "code_length": {
-        "title": "Code Length Configuration",
-        "description": "{discovery_notice}\n\nIf your locks use different PIN lengths (e.g. some are 4-digit and others are 6-digit), turn on the toggle below to set separate short and long lengths.\n\nWhen the toggle is OFF, only the Code Length slider is used.\nWhen the toggle is ON, only the Short and Long sliders are used.",
+        "title": "Code Length Mode",
+        "description": "{discovery_notice}\n\nIf your locks use different PIN lengths (e.g. some are 4-digit and others are 6-digit), turn on the toggle below to set separate short and long lengths.",
         "data": {
-          "code_length_mode": "Use two code lengths (Short + Long)",
-          "code_length_single": "Code length (used when toggle is OFF)",
-          "code_length_short": "Short code length (used when toggle is ON)",
-          "code_length_long": "Long code length (used when toggle is ON)"
+          "code_length_mode": "Use two code lengths (Short + Long)"
+        }
+      },
+      "code_length_single": {
+        "title": "Code Length",
+        "description": "Set the PIN code length that all locks will use.",
+        "data": {
+          "code_length_single": "Code length"
+        }
+      },
+      "code_length_dual": {
+        "title": "Short & Long Code Lengths",
+        "description": "Set the short and long PIN code lengths. Short must be less than long.",
+        "data": {
+          "code_length_short": "Short code length",
+          "code_length_long": "Long code length"
         }
       },
       "lockout": {
@@ -31,6 +43,13 @@
           "lockout_trigger_entity": "Lockout trigger entity",
           "lockout_target_states": "Target states (lockout activates when entity matches any)",
           "lockout_participating_locks": "Participating locks"
+        }
+      },
+      "secure_mode": {
+        "title": "Secure Mode — Optional",
+        "description": "When Secure Mode is enabled, all stored PIN codes are encrypted at rest. You will be prompted to set a password the first time you open the SlotSentry panel.\n\nSecure Mode can also be enabled or disabled later via Reconfigure.",
+        "data": {
+          "secure_mode": "Enable Secure Mode"
         }
       },
       "confirm": {
@@ -47,6 +66,7 @@
       "short_gte_long": "Short code length must be less than long code length.",
       "no_lockout_locks": "At least one lock must participate in lockout.",
       "no_lockout_states": "Select at least one target state when lockout is enabled.",
+      "no_lockout_trigger": "Select a trigger entity when lockout is enabled.",
       "duplicate_label": "Slot labels must be unique."
     }
   },

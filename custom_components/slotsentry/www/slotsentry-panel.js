@@ -1,7 +1,8 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a2
+ * Version: 2026.4.0a3
+ * Revision: 1.1
  *
  * Copyright (c) 2026 Chris Caho
  * SPDX-License-Identifier: MIT
@@ -20,63 +21,252 @@
  */
 
 // ---------------------------------------------------------------------------
-// LitElement shim — use HA's bundled version if available, otherwise fall
-// back to a minimal reactive-property / render loop so the panel works even
-// during HA's JS bundle loading phase.
+// LitElement acquisition — try HA's internal registry first, fall back to
+// an improved shim that handles nested templates and event bindings.
 // ---------------------------------------------------------------------------
 
-const { LitElement, html, css } =
-  window.LitElement
-    ? window
-    : (() => {
-        // Minimal shim — good enough while the real bundle loads.
-        class LitElement extends HTMLElement {
-          static get properties() { return {}; }
-          static get styles() { return []; }
-          constructor() {
-            super();
-            this.attachShadow({ mode: "open" });
-            this._props = {};
+// Attempt to steal LitElement from an element HA has already registered.
+// HA's own elements inherit from LitElement, so the prototype chain gives us
+// the real class including html/css tagged template literals.
+function _tryGetHALitElement() {
+  const candidates = [
+    "home-assistant",
+    "ha-panel-lovelace",
+    "ha-sidebar",
+    "ha-card",
+  ];
+  for (const tag of candidates) {
+    const ctor = customElements.get(tag);
+    if (!ctor) continue;
+    // Walk up the prototype chain to find a constructor whose name is
+    // "LitElement" or which has the 'render' / '_$litElement$' marker.
+    let proto = Object.getPrototypeOf(ctor.prototype);
+    while (proto && proto !== HTMLElement.prototype && proto !== Object.prototype) {
+      const c = proto.constructor;
+      if (
+        (c && c.name === "LitElement") ||
+        (c && typeof c.finalize === "function" && typeof c.addInitializer === "function")
+      ) {
+        return c;
+      }
+      proto = Object.getPrototypeOf(proto);
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Shim infrastructure — used only when HA's LitElement is unavailable.
+// ---------------------------------------------------------------------------
+
+// Handler registry for event bindings inside the shim.
+const _shimHandlers = new Map();
+let _shimHandlerSeq = 0;
+
+/**
+ * Recursively flatten a template result (or any value) to an HTML string.
+ * Functions are registered in _shimHandlers and replaced with a sentinel
+ * attribute value so the post-render DOM walk can bind them.
+ *
+ * LitElement template directive syntax is converted here:
+ *   @event="..."   →  data-shim-on-event="handler_N"
+ *   ?attr="..."    →  data-shim-bool-attr="N"  (truthy) or omitted
+ *   .prop="..."    →  data-shim-prop-prop="N"
+ */
+function _flattenTemplate(tmpl) {
+  if (tmpl == null || tmpl === false || tmpl === undefined) return "";
+  if (typeof tmpl === "string") return tmpl;
+  if (typeof tmpl === "number" || typeof tmpl === "boolean") return String(tmpl);
+  if (Array.isArray(tmpl)) return tmpl.map(_flattenTemplate).join("");
+  if (tmpl.strings) {
+    // This is a { strings, values } template result.
+    return tmpl.strings.reduce((acc, s, i) => {
+      if (i >= tmpl.values.length) return acc + s;
+      const val = tmpl.values[i];
+
+      // Inspect the preceding static string to detect LitElement directives.
+      // The directive token is the last attribute-like token at the end of `s`.
+      // e.g.  `... @click="`  or  `... ?disabled="`  or  `... .value="`
+      const attrMatch = s.match(/[\s;](@|[?.])([\w-]+)="$/);
+      if (attrMatch) {
+        const [fullMatch, prefix, attrName] = attrMatch;
+        // Keep everything up to (but not including) the directive token.
+        // fullMatch starts with a whitespace/semicolon separator which we preserve.
+        const trimmedS = s.slice(0, s.lastIndexOf(fullMatch) + 1);
+
+        if (prefix === "@") {
+          // Event binding: @eventname="${handler}"
+          // Replace with data-shim-on-eventname="N"
+          if (typeof val === "function") {
+            const id = ++_shimHandlerSeq;
+            _shimHandlers.set(id, val);
+            return acc + trimmedS + `data-shim-on-${attrName}="${id}"`;
           }
-          set hass(v) { this._props.hass = v; this._requestRender(); }
-          get hass() { return this._props.hass; }
-          set panel(v) { this._props.panel = v; this._requestRender(); }
-          get panel() { return this._props.panel; }
-          connectedCallback() { this._requestRender(); }
-          _requestRender() {
-            if (this._renderScheduled) return;
-            this._renderScheduled = true;
-            Promise.resolve().then(() => {
-              this._renderScheduled = false;
-              this._doRender();
-            });
-          }
-          _doRender() {
-            const tmpl = this.render();
-            if (!tmpl) return;
-            this.shadowRoot.innerHTML = "";
-            const styles = this.constructor.styles || [];
-            const styleEl = document.createElement("style");
-            styleEl.textContent = (Array.isArray(styles) ? styles : [styles])
-              .map(s => (s && s.cssText) ? s.cssText : String(s))
-              .join("\n");
-            this.shadowRoot.appendChild(styleEl);
-            // Minimal html tag template support
-            const div = document.createElement("div");
-            div.innerHTML = tmpl.strings
-              ? tmpl.strings.reduce((acc, s, i) => acc + s + (tmpl.values[i] != null ? tmpl.values[i] : ""), "")
-              : String(tmpl);
-            while (div.firstChild) this.shadowRoot.appendChild(div.firstChild);
-          }
-          render() { return null; }
-          requestUpdate() { this._requestRender(); }
+          return acc + trimmedS;
         }
-        const html = (strings, ...values) => ({ strings, values });
-        const css = (strings, ...values) => ({
-          cssText: strings.reduce((acc, s, i) => acc + s + (values[i] != null ? values[i] : ""), "")
-        });
-        return { LitElement, html, css };
-      })();
+
+        if (prefix === "?") {
+          // Boolean attribute: ?attr="${bool}"
+          if (val) {
+            return acc + trimmedS + `${attrName}=""`;
+          }
+          return acc + trimmedS;
+        }
+
+        if (prefix === ".") {
+          // Property binding: .prop="${value}"
+          const id = ++_shimHandlerSeq;
+          // Store the value (not necessarily a function)
+          _shimHandlers.set(id, val);
+          return acc + trimmedS + `data-shim-prop-${attrName}="${id}"`;
+        }
+      }
+
+      // Plain interpolation: recursively flatten
+      return acc + s + _flattenTemplate(val);
+    }, "");
+  }
+  return String(tmpl);
+}
+
+/**
+ * After setting innerHTML on an element, walk all descendants and process
+ * shim data attributes, attaching event listeners, setting properties,
+ * and applying boolean attributes.
+ */
+function _processShimBindings(root) {
+  // We need to visit all elements — querySelectorAll works on fragments.
+  const all = root.querySelectorAll ? root.querySelectorAll("*") : [];
+  for (const el of all) {
+    const attrs = Array.from(el.attributes);
+    for (const attr of attrs) {
+      const name = attr.name;
+      const rawId = parseInt(attr.value, 10);
+
+      if (name.startsWith("data-shim-on-")) {
+        // Event binding
+        const eventName = name.slice("data-shim-on-".length);
+        const handler = _shimHandlers.get(rawId);
+        if (handler) {
+          el.addEventListener(eventName, handler);
+          _shimHandlers.delete(rawId);
+        }
+        el.removeAttribute(name);
+      } else if (name.startsWith("data-shim-prop-")) {
+        // Property binding
+        const propName = name.slice("data-shim-prop-".length);
+        const val = _shimHandlers.get(rawId);
+        if (val !== undefined) {
+          el[propName] = val;
+          _shimHandlers.delete(rawId);
+        }
+        el.removeAttribute(name);
+      }
+      // Boolean attrs were already handled inline during flattening (either
+      // emitted as `attrname=""` or omitted entirely), so nothing to do here.
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build the { LitElement, html, css } triple.
+// ---------------------------------------------------------------------------
+
+const { LitElement, html, css } = (() => {
+  // --- Attempt 1: real LitElement from HA's registry ---
+  const realLit = _tryGetHALitElement();
+  if (realLit) {
+    // html and css come from the 'lit' module; they're available on the
+    // prototype chain or via the static properties of the element itself.
+    // HA 2023+ bundles lit and exposes html/css via module exports that
+    // are *not* directly accessible as globals.  However, the tagged template
+    // functions produce TemplateResult / CSSResult objects — if we have the
+    // real LitElement we need the matching html/css.  If they aren't on the
+    // constructor we fall through to a shim that's compatible enough.
+    const haHtml = realLit.html || (window.lit && window.lit.html);
+    const haCss  = realLit.css  || (window.lit && window.lit.css);
+    if (haHtml && haCss) {
+      return { LitElement: realLit, html: haHtml, css: haCss };
+    }
+    // We have the class but not the template functions — still use the class
+    // with our shim html/css (the class's _doRender won't be ours, so fall
+    // through fully to the shim below so everything is consistent).
+  }
+
+  // --- Attempt 2: full shim ---
+  class LitElement extends HTMLElement {
+    static get properties() { return {}; }
+    static get styles()     { return []; }
+
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._props = {};
+    }
+
+    set hass(v)  { this._props.hass  = v; this._requestRender(); }
+    get hass()   { return this._props.hass; }
+    set panel(v) { this._props.panel = v; this._requestRender(); }
+    get panel()  { return this._props.panel; }
+
+    connectedCallback() { this._requestRender(); }
+
+    _requestRender() {
+      if (this._renderScheduled) return;
+      this._renderScheduled = true;
+      Promise.resolve().then(() => {
+        this._renderScheduled = false;
+        this._doRender();
+      });
+    }
+
+    _doRender() {
+      const tmpl = this.render();
+      if (!tmpl && tmpl !== 0) return;
+
+      // Rebuild shadow DOM
+      this.shadowRoot.innerHTML = "";
+
+      // Inject styles
+      const styles = this.constructor.styles || [];
+      const styleEl = document.createElement("style");
+      styleEl.textContent = (Array.isArray(styles) ? styles : [styles])
+        .map(s => (s && s.cssText) ? s.cssText : String(s))
+        .join("\n");
+      this.shadowRoot.appendChild(styleEl);
+
+      // Render template to HTML string, encoding directives as data-shim-* attrs
+      const htmlStr = _flattenTemplate(tmpl);
+
+      // Parse into real DOM nodes
+      const div = document.createElement("div");
+      div.innerHTML = htmlStr;
+
+      // Post-process: attach event listeners, set properties
+      _processShimBindings(div);
+
+      // Move children into shadow root
+      while (div.firstChild) {
+        this.shadowRoot.appendChild(div.firstChild);
+      }
+    }
+
+    render() { return null; }
+    requestUpdate() { this._requestRender(); }
+    // Stub updated() so subclass override doesn't crash
+    updated(_changedProps) {}
+  }
+
+  const html = (strings, ...values) => ({ strings, values });
+  const css  = (strings, ...values) => ({
+    cssText: strings.reduce(
+      (acc, s, i) => acc + s + (values[i] != null ? String(values[i].cssText || values[i]) : ""),
+      ""
+    ),
+  });
+
+  return { LitElement, html, css };
+})();
 
 // ---------------------------------------------------------------------------
 // SlotSentryPanel

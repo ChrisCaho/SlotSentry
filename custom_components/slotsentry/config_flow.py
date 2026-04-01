@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.3
+Revision: 1.4
 """
 
 from __future__ import annotations
@@ -104,19 +104,72 @@ def _build_lock_options(locks: list[dict[str, Any]]) -> list[SelectOptionDict]:
     ]
 
 
-def _estimate_slot_count(hass: HomeAssistant, entity_ids: list[str]) -> int:
-    """Estimate slot count as the minimum across selected locks."""
+async def _async_get_max_user_codes(
+    hass: HomeAssistant, entity_id: str
+) -> int | None:
+    """Query the Z-Wave User Code CC for the supported number of code slots."""
+    try:
+        response = await hass.services.async_call(
+            "zwave_js",
+            "invoke_cc_api",
+            {
+                "entity_id": entity_id,
+                "command_class": "User Code",
+                "endpoint": 0,
+                "method_name": "getUsersNumber",
+                "parameters": [],
+            },
+            blocking=True,
+            return_response=True,
+        )
+        if isinstance(response, dict):
+            payload = response.get(entity_id, response)
+            if isinstance(payload, dict):
+                count = payload.get("supportedUsers")
+                if isinstance(count, int) and count > 0:
+                    _LOGGER.debug(
+                        "User Code CC reports %d slots for %s",
+                        count,
+                        entity_id,
+                    )
+                    return count
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug(
+            "Could not query User Code CC for %s; will try state attributes",
+            entity_id,
+        )
+    return None
+
+
+async def _async_estimate_slot_count(
+    hass: HomeAssistant, entity_ids: list[str]
+) -> int:
+    """Estimate slot count as the minimum across selected locks.
+
+    Queries the Z-Wave User Code CC first (most reliable), falls back to
+    state attributes, then to a default of 30.
+    """
     counts: list[int] = []
     for eid in entity_ids:
-        state = hass.states.get(eid)
-        if state is None:
-            continue
-        max_codes = state.attributes.get("max_user_codes")
-        if isinstance(max_codes, int) and 1 <= max_codes <= MAX_SLOTS:
+        # Try Z-Wave CC API first (most accurate).
+        max_codes = await _async_get_max_user_codes(hass, eid)
+        if max_codes is not None and 1 <= max_codes <= MAX_SLOTS:
             counts.append(max_codes)
+            continue
+        # Fallback to state attributes.
+        state = hass.states.get(eid)
+        if state is not None:
+            max_codes_attr = state.attributes.get("max_user_codes")
+            if isinstance(max_codes_attr, int) and 1 <= max_codes_attr <= MAX_SLOTS:
+                counts.append(max_codes_attr)
     if not counts:
+        _LOGGER.warning(
+            "Could not determine slot count for any lock; using default 30"
+        )
         return 30
-    return min(counts)
+    result = min(counts)
+    _LOGGER.info("Slot count determined: %d (from %d locks)", result, len(counts))
+    return result
 
 
 def _discover_code_lengths(
@@ -193,6 +246,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         locks       — Discover and select Z-Wave lock entities.
         code_length — Code length mode toggle + all sliders on one form.
         lockout     — Optional keypad lockout with multi-state trigger.
+        secure_mode — Optional Secure Mode toggle.
         confirm     — Full configuration summary.
     """
 
@@ -214,6 +268,8 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         self._lockout_trigger_entity: str | None = None
         self._lockout_target_states: list[str] = []
         self._lockout_participating_locks: list[str] = []
+
+        self._secure_mode: bool = False
 
     # ------------------------------------------------------------------
     # Step 1: Welcome
@@ -256,7 +312,9 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors[CONF_LOCK_ENTITIES] = "no_locks_selected"
             else:
                 self._lock_entities = selected
-                self._slot_count = _estimate_slot_count(self.hass, selected)
+                self._slot_count = await _async_estimate_slot_count(
+                    self.hass, selected
+                )
                 self._discovered_code_lengths = _discover_code_lengths(
                     self.hass, selected
                 )
@@ -289,61 +347,36 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Step 3: Code Length (all on one form)
+    # Step 3a: Code Length Mode
     # ------------------------------------------------------------------
 
     async def async_step_code_length(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Configure code length mode and values on a single form.
+        """Ask whether to use single or dual code length mode.
 
-        Shows a mode toggle plus all three sliders. The description explains
-        which sliders apply. Validation uses the relevant values based on mode.
+        Based on the answer, routes to the appropriate slider step so
+        the user only sees relevant controls.
         """
         (
             suggest_dual,
-            default_single,
-            default_short,
-            default_long,
+            _default_single,
+            _default_short,
+            _default_long,
             self._discovery_ok,
         ) = _suggest_code_length_defaults(self._discovered_code_lengths)
 
-        # Restore previous selections on back-navigation.
+        # Restore previous selection on back-navigation.
         if self._code_length_mode == CODE_LENGTH_DUAL:
             suggest_dual = True
-            if self._code_length_short != DEFAULT_CODE_LENGTH_SHORT:
-                default_short = self._code_length_short
-            if self._code_length_long != DEFAULT_CODE_LENGTH_LONG:
-                default_long = self._code_length_long
-        else:
-            if self._code_length_single != DEFAULT_CODE_LENGTH_SINGLE:
-                default_single = self._code_length_single
-
-        errors: dict[str, str] = {}
 
         if user_input is not None:
             dual_mode: bool = user_input.get(CONF_CODE_LENGTH_MODE, False)
-
             if dual_mode:
-                short = int(user_input.get(CONF_CODE_LENGTH_SHORT, default_short))
-                long_ = int(user_input.get(CONF_CODE_LENGTH_LONG, default_long))
-                if short >= long_:
-                    errors[CONF_CODE_LENGTH_SHORT] = "short_gte_long"
-                else:
-                    self._code_length_mode = CODE_LENGTH_DUAL
-                    self._code_length_short = short
-                    self._code_length_long = long_
-                    self._code_length_single = DEFAULT_CODE_LENGTH_SINGLE
-                    return await self.async_step_lockout()
-            else:
-                single = int(
-                    user_input.get(CONF_CODE_LENGTH_SINGLE, default_single)
-                )
-                self._code_length_mode = CODE_LENGTH_SINGLE
-                self._code_length_single = single
-                self._code_length_short = DEFAULT_CODE_LENGTH_SHORT
-                self._code_length_long = DEFAULT_CODE_LENGTH_LONG
-                return await self.async_step_lockout()
+                self._code_length_mode = CODE_LENGTH_DUAL
+                return await self.async_step_code_length_dual()
+            self._code_length_mode = CODE_LENGTH_SINGLE
+            return await self.async_step_code_length_single()
 
         if self._discovery_ok:
             notice = (
@@ -361,7 +394,47 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_CODE_LENGTH_MODE, default=suggest_dual
                 ): BooleanSelector(),
-                vol.Optional(
+            }
+        )
+
+        return self.async_show_form(
+            step_id="code_length",
+            data_schema=schema,
+            last_step=False,
+            description_placeholders={"discovery_notice": notice},
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3b: Single Code Length slider
+    # ------------------------------------------------------------------
+
+    async def async_step_code_length_single(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show a single code length slider."""
+        (
+            _suggest_dual,
+            default_single,
+            _default_short,
+            _default_long,
+            _discovery_ok,
+        ) = _suggest_code_length_defaults(self._discovered_code_lengths)
+
+        # Restore previous value on back-navigation.
+        if self._code_length_single != DEFAULT_CODE_LENGTH_SINGLE:
+            default_single = self._code_length_single
+
+        if user_input is not None:
+            self._code_length_single = int(
+                user_input.get(CONF_CODE_LENGTH_SINGLE, default_single)
+            )
+            self._code_length_short = DEFAULT_CODE_LENGTH_SHORT
+            self._code_length_long = DEFAULT_CODE_LENGTH_LONG
+            return await self.async_step_lockout()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
                     CONF_CODE_LENGTH_SINGLE, default=default_single
                 ): NumberSelector(
                     NumberSelectorConfig(
@@ -372,7 +445,53 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                         unit_of_measurement="digits",
                     )
                 ),
-                vol.Optional(
+            }
+        )
+
+        return self.async_show_form(
+            step_id="code_length_single",
+            data_schema=schema,
+            last_step=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 3c: Dual Code Length sliders (Short + Long)
+    # ------------------------------------------------------------------
+
+    async def async_step_code_length_dual(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show short and long code length sliders."""
+        (
+            _suggest_dual,
+            _default_single,
+            default_short,
+            default_long,
+            _discovery_ok,
+        ) = _suggest_code_length_defaults(self._discovered_code_lengths)
+
+        # Restore previous values on back-navigation.
+        if self._code_length_short != DEFAULT_CODE_LENGTH_SHORT:
+            default_short = self._code_length_short
+        if self._code_length_long != DEFAULT_CODE_LENGTH_LONG:
+            default_long = self._code_length_long
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            short = int(user_input.get(CONF_CODE_LENGTH_SHORT, default_short))
+            long_ = int(user_input.get(CONF_CODE_LENGTH_LONG, default_long))
+            if short >= long_:
+                errors[CONF_CODE_LENGTH_SHORT] = "short_gte_long"
+            else:
+                self._code_length_short = short
+                self._code_length_long = long_
+                self._code_length_single = DEFAULT_CODE_LENGTH_SINGLE
+                return await self.async_step_lockout()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
                     CONF_CODE_LENGTH_SHORT, default=default_short
                 ): NumberSelector(
                     NumberSelectorConfig(
@@ -383,7 +502,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                         unit_of_measurement="digits",
                     )
                 ),
-                vol.Optional(
+                vol.Required(
                     CONF_CODE_LENGTH_LONG, default=default_long
                 ): NumberSelector(
                     NumberSelectorConfig(
@@ -398,11 +517,10 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
         return self.async_show_form(
-            step_id="code_length",
+            step_id="code_length_dual",
             data_schema=schema,
             errors=errors,
             last_step=False,
-            description_placeholders={"discovery_notice": notice},
         )
 
     # ------------------------------------------------------------------
@@ -427,22 +545,24 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_LOCKOUT_PARTICIPATING_LOCKS, []
                 )
 
-                if not target_states:
+                if not trigger_entity:
+                    errors[CONF_LOCKOUT_TRIGGER_ENTITY] = "no_lockout_trigger"
+                elif not target_states:
                     errors[CONF_LOCKOUT_TARGET_STATES] = "no_lockout_states"
                 elif not participating:
                     errors[CONF_LOCKOUT_PARTICIPATING_LOCKS] = "no_lockout_locks"
                 else:
                     self._lockout_enabled = True
-                    self._lockout_trigger_entity = trigger_entity or None
+                    self._lockout_trigger_entity = trigger_entity
                     self._lockout_target_states = target_states
                     self._lockout_participating_locks = participating
-                    return await self.async_step_confirm()
+                    return await self.async_step_secure_mode()
             else:
                 self._lockout_enabled = False
                 self._lockout_trigger_entity = None
                 self._lockout_target_states = []
                 self._lockout_participating_locks = []
-                return await self.async_step_confirm()
+                return await self.async_step_secure_mode()
 
         # Build lock options (plain names — no capability annotations).
         lock_labels: list[dict[str, Any]] = []
@@ -501,7 +621,33 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Step 5: Summary / Confirm
+    # Step 5: Secure Mode (optional)
+    # ------------------------------------------------------------------
+
+    async def async_step_secure_mode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Optionally enable Secure Mode for PIN code storage encryption."""
+        if user_input is not None:
+            self._secure_mode = user_input.get(CONF_SECURE_MODE, False)
+            return await self.async_step_confirm()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SECURE_MODE, default=self._secure_mode
+                ): BooleanSelector(),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="secure_mode",
+            data_schema=schema,
+            last_step=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 6: Summary / Confirm
     # ------------------------------------------------------------------
 
     async def async_step_confirm(
@@ -548,7 +694,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 "code_length_mode": mode_label,
                 "code_lengths": lengths_detail,
                 "lockout_summary": lockout_summary,
-                "secure_mode": "OFF (plain text)",
+                "secure_mode": "ON (encrypted)" if self._secure_mode else "OFF (plain text)",
             },
         )
 
@@ -566,7 +712,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_CODE_LENGTH_SINGLE: self._code_length_single,
             CONF_CODE_LENGTH_SHORT: self._code_length_short,
             CONF_CODE_LENGTH_LONG: self._code_length_long,
-            CONF_SECURE_MODE: False,
+            CONF_SECURE_MODE: self._secure_mode,
             CONF_LOCKOUT_ENABLED: self._lockout_enabled,
             CONF_LOCKOUT_TRIGGER_ENTITY: self._lockout_trigger_entity,
             CONF_LOCKOUT_TARGET_STATES: self._lockout_target_states,
