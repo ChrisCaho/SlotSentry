@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.4
+Revision: 1.5
 """
 
 from __future__ import annotations
@@ -88,13 +88,88 @@ def _discover_zwave_locks(hass: HomeAssistant) -> list[dict[str, Any]]:
                 {
                     "entity_id": entry.entity_id,
                     "name": entry.name or entry.original_name or entry.entity_id,
+                    "slots": None,
+                    "code_length": None,
                 }
             )
     return locks
 
 
+async def _async_discover_lock_capabilities(
+    hass: HomeAssistant, locks: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Probe each lock for slot count and code length.
+
+    Annotates each lock dict in-place with 'slots' and 'code_length' keys.
+    Uses the Z-Wave User Code CC and searches for pin-length number entities
+    on the same device.
+    """
+    registry = er.async_get(hass)
+
+    for lock in locks:
+        eid = lock["entity_id"]
+
+        # --- Slot count via User Code CC ---
+        lock["slots"] = await _async_get_max_user_codes(hass, eid)
+
+        # --- Code length: try state attributes first ---
+        code_len: int | None = None
+        state = hass.states.get(eid)
+        if state:
+            min_len = state.attributes.get("usercode_min_length")
+            if isinstance(min_len, int):
+                code_len = min_len
+
+        # Fallback: find a number.*pin_length entity on the same device.
+        if code_len is None:
+            lock_entry = registry.async_get(eid)
+            if lock_entry and lock_entry.device_id:
+                for ent in registry.entities.values():
+                    if (
+                        ent.device_id == lock_entry.device_id
+                        and ent.domain == "number"
+                        and "pin_length" in (ent.entity_id or "").lower()
+                    ):
+                        pin_state = hass.states.get(ent.entity_id)
+                        if pin_state and pin_state.state not in (
+                            "unknown",
+                            "unavailable",
+                        ):
+                            try:
+                                code_len = int(float(pin_state.state))
+                            except (ValueError, TypeError):
+                                pass
+                            break
+
+        lock["code_length"] = code_len
+        _LOGGER.debug(
+            "Lock %s: slots=%s, code_length=%s",
+            eid,
+            lock["slots"],
+            lock["code_length"],
+        )
+    return locks
+
+
 def _build_lock_options(locks: list[dict[str, Any]]) -> list[SelectOptionDict]:
-    """Convert a list of lock dicts into voluptuous SelectOptionDicts."""
+    """Convert lock dicts to SelectOptionDicts with capability annotations."""
+    options: list[SelectOptionDict] = []
+    for lock in locks:
+        annotations: list[str] = []
+        if lock.get("code_length"):
+            annotations.append(f"code len: {lock['code_length']}")
+        if lock.get("slots"):
+            annotations.append(f"Slots: {lock['slots']}")
+        if annotations:
+            label = f"{lock['name']} ({', '.join(annotations)})"
+        else:
+            label = lock["name"] or lock["entity_id"]
+        options.append(SelectOptionDict(value=lock["entity_id"], label=label))
+    return options
+
+
+def _build_lock_options_plain(locks: list[dict[str, Any]]) -> list[SelectOptionDict]:
+    """Convert lock dicts to SelectOptionDicts without annotations."""
     return [
         SelectOptionDict(
             value=lock["entity_id"],
@@ -140,55 +215,6 @@ async def _async_get_max_user_codes(
         )
     return None
 
-
-async def _async_estimate_slot_count(
-    hass: HomeAssistant, entity_ids: list[str]
-) -> int:
-    """Estimate slot count as the minimum across selected locks.
-
-    Queries the Z-Wave User Code CC first (most reliable), falls back to
-    state attributes, then to a default of 30.
-    """
-    counts: list[int] = []
-    for eid in entity_ids:
-        # Try Z-Wave CC API first (most accurate).
-        max_codes = await _async_get_max_user_codes(hass, eid)
-        if max_codes is not None and 1 <= max_codes <= MAX_SLOTS:
-            counts.append(max_codes)
-            continue
-        # Fallback to state attributes.
-        state = hass.states.get(eid)
-        if state is not None:
-            max_codes_attr = state.attributes.get("max_user_codes")
-            if isinstance(max_codes_attr, int) and 1 <= max_codes_attr <= MAX_SLOTS:
-                counts.append(max_codes_attr)
-    if not counts:
-        _LOGGER.warning(
-            "Could not determine slot count for any lock; using default 30"
-        )
-        return 30
-    result = min(counts)
-    _LOGGER.info("Slot count determined: %d (from %d locks)", result, len(counts))
-    return result
-
-
-def _discover_code_lengths(
-    hass: HomeAssistant, entity_ids: list[str]
-) -> dict[str, int | None]:
-    """Attempt to read code length attributes from each lock."""
-    result: dict[str, int | None] = {}
-    for eid in entity_ids:
-        state = hass.states.get(eid)
-        if state is None:
-            result[eid] = None
-            continue
-        min_len = state.attributes.get("usercode_min_length")
-        max_len = state.attributes.get("usercode_max_length")
-        if isinstance(min_len, int) and isinstance(max_len, int):
-            result[eid] = min_len
-        else:
-            result[eid] = None
-    return result
 
 
 def _suggest_code_length_defaults(
@@ -242,18 +268,20 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for SlotSentry.
 
     Steps:
-        user        — Welcome screen.
-        locks       — Discover and select Z-Wave lock entities.
-        code_length — Code length mode toggle + all sliders on one form.
-        lockout     — Optional keypad lockout with multi-state trigger.
-        secure_mode — Optional Secure Mode toggle.
-        confirm     — Full configuration summary.
+        user                — Welcome screen.
+        locks               — Discover locks (with capabilities), select + mode toggle.
+        code_length_single  — Single code length slider (if mode = single).
+        code_length_dual    — Short + Long sliders (if mode = dual).
+        lockout             — Optional keypad lockout with multi-state trigger.
+        secure_mode         — Optional Secure Mode toggle.
+        confirm             — Full configuration summary.
     """
 
     VERSION = 1
 
     def __init__(self) -> None:
         """Initialise flow state."""
+        self._available_locks: list[dict[str, Any]] = []
         self._lock_entities: list[str] = []
         self._slot_count: int = 0
         self._discovered_code_lengths: dict[str, int | None] = {}
@@ -291,51 +319,119 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Step 2: Lock Discovery & Selection
+    # Step 2: Lock Discovery, Selection & Code Length Mode
     # ------------------------------------------------------------------
 
     async def async_step_locks(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Discover Z-Wave locks and let the user select which to manage."""
-        available_locks = _discover_zwave_locks(self.hass)
+        """Discover Z-Wave locks with capabilities, let user select and choose mode.
 
-        if not available_locks:
-            return self.async_abort(reason="no_zwave_locks")
+        This step shows:
+          - Lock selector with annotations: "Lock Name (code len: N, Slots: NN)"
+          - Code length mode toggle: single vs dual
+          - Description with discovery results and mode explanation
+        """
+        # Discover and probe all locks on first visit (or re-entry).
+        if not self._available_locks:
+            raw_locks = _discover_zwave_locks(self.hass)
+            if not raw_locks:
+                return self.async_abort(reason="no_zwave_locks")
+            self._available_locks = await _async_discover_lock_capabilities(
+                self.hass, raw_locks
+            )
 
         errors: dict[str, str] = {}
 
         if user_input is not None:
             selected: list[str] = user_input.get(CONF_LOCK_ENTITIES, [])
+            dual_mode: bool = user_input.get(CONF_CODE_LENGTH_MODE, False)
 
             if not selected:
                 errors[CONF_LOCK_ENTITIES] = "no_locks_selected"
             else:
                 self._lock_entities = selected
-                self._slot_count = await _async_estimate_slot_count(
-                    self.hass, selected
-                )
-                self._discovered_code_lengths = _discover_code_lengths(
-                    self.hass, selected
-                )
-                return await self.async_step_code_length()
 
-        lock_options = _build_lock_options(available_locks)
+                # Compute slot count from discovered data.
+                slot_counts = [
+                    lock["slots"]
+                    for lock in self._available_locks
+                    if lock["entity_id"] in selected and lock.get("slots")
+                ]
+                self._slot_count = min(slot_counts) if slot_counts else 30
+                if not slot_counts:
+                    _LOGGER.warning(
+                        "Could not determine slot count for selected locks; "
+                        "using default 30"
+                    )
+                else:
+                    _LOGGER.info(
+                        "Slot count: %d (min of %s)",
+                        self._slot_count,
+                        slot_counts,
+                    )
+
+                # Build code length discovery from already-probed data.
+                self._discovered_code_lengths = {
+                    lock["entity_id"]: lock.get("code_length")
+                    for lock in self._available_locks
+                    if lock["entity_id"] in selected
+                }
+
+                if dual_mode:
+                    self._code_length_mode = CODE_LENGTH_DUAL
+                    return await self.async_step_code_length_dual()
+                self._code_length_mode = CODE_LENGTH_SINGLE
+                return await self.async_step_code_length_single()
+
+        # Build lock options with capability annotations.
+        lock_options = _build_lock_options(self._available_locks)
         default_ids = (
             self._lock_entities
             if self._lock_entities
-            else [lock["entity_id"] for lock in available_locks]
+            else [lock["entity_id"] for lock in self._available_locks]
         )
+
+        # Suggest dual mode if locks have different code lengths.
+        discovered_lengths = {
+            lock.get("code_length")
+            for lock in self._available_locks
+            if lock.get("code_length") is not None
+        }
+        suggest_dual = len(discovered_lengths) > 1
+        if self._code_length_mode == CODE_LENGTH_DUAL:
+            suggest_dual = True
+
+        # Build description notice.
+        if all(lock.get("code_length") for lock in self._available_locks):
+            discovery_notice = (
+                "Code lengths and slot counts detected from your locks."
+            )
+        elif any(lock.get("code_length") for lock in self._available_locks):
+            discovery_notice = (
+                "Some locks reported their capabilities. "
+                "Others may need manual verification."
+            )
+        else:
+            discovery_notice = (
+                "Could not auto-detect code lengths. "
+                "Please verify against your lock specifications."
+            )
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_LOCK_ENTITIES, default=default_ids): SelectSelector(
+                vol.Required(
+                    CONF_LOCK_ENTITIES, default=default_ids
+                ): SelectSelector(
                     SelectSelectorConfig(
                         options=lock_options,
                         multiple=True,
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Required(
+                    CONF_CODE_LENGTH_MODE, default=suggest_dual
+                ): BooleanSelector(),
             }
         )
 
@@ -344,64 +440,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=schema,
             errors=errors,
             last_step=False,
-        )
-
-    # ------------------------------------------------------------------
-    # Step 3a: Code Length Mode
-    # ------------------------------------------------------------------
-
-    async def async_step_code_length(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Ask whether to use single or dual code length mode.
-
-        Based on the answer, routes to the appropriate slider step so
-        the user only sees relevant controls.
-        """
-        (
-            suggest_dual,
-            _default_single,
-            _default_short,
-            _default_long,
-            self._discovery_ok,
-        ) = _suggest_code_length_defaults(self._discovered_code_lengths)
-
-        # Restore previous selection on back-navigation.
-        if self._code_length_mode == CODE_LENGTH_DUAL:
-            suggest_dual = True
-
-        if user_input is not None:
-            dual_mode: bool = user_input.get(CONF_CODE_LENGTH_MODE, False)
-            if dual_mode:
-                self._code_length_mode = CODE_LENGTH_DUAL
-                return await self.async_step_code_length_dual()
-            self._code_length_mode = CODE_LENGTH_SINGLE
-            return await self.async_step_code_length_single()
-
-        if self._discovery_ok:
-            notice = (
-                "Code lengths detected from your locks. "
-                "Defaults reflect what was found."
-            )
-        else:
-            notice = (
-                "Could not auto-detect code lengths for all locks. "
-                "Please verify against your lock specifications."
-            )
-
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_CODE_LENGTH_MODE, default=suggest_dual
-                ): BooleanSelector(),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="code_length",
-            data_schema=schema,
-            last_step=False,
-            description_placeholders={"discovery_notice": notice},
+            description_placeholders={"discovery_notice": discovery_notice},
         )
 
     # ------------------------------------------------------------------
@@ -570,7 +609,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             name = _get_lock_name(self.hass, eid)
             lock_labels.append({"entity_id": eid, "name": name})
 
-        participating_options = _build_lock_options(lock_labels)
+        participating_options = _build_lock_options_plain(lock_labels)
 
         state_options: list[SelectOptionDict] = [
             SelectOptionDict(value=s, label=s) for s in _LOCKOUT_STATE_SUGGESTIONS

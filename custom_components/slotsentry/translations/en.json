@@ -7,16 +7,10 @@
         "data": {}
       },
       "locks": {
-        "title": "Select Z-Wave Locks",
-        "description": "Select all locks you want SlotSentry to manage. The number of available slots will be determined by the lock with the smallest capacity.",
+        "title": "Select Locks & Code Length Mode",
+        "description": "{discovery_notice}\n\nSelect the locks you want SlotSentry to manage. Slot count will be the smallest capacity among selected locks.\n\nIf your locks use different PIN lengths, turn on the toggle below to set separate short and long lengths on the next screen.",
         "data": {
-          "lock_entities": "Locks to manage"
-        }
-      },
-      "code_length": {
-        "title": "Code Length Mode",
-        "description": "{discovery_notice}\n\nIf your locks use different PIN lengths (e.g. some are 4-digit and others are 6-digit), turn on the toggle below to set separate short and long lengths.",
-        "data": {
+          "lock_entities": "Locks to manage",
           "code_length_mode": "Use two code lengths (Short + Long)"
         }
       },
