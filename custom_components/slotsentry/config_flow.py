@@ -540,7 +540,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema({}),
-            last_step=True,
+            last_step=False,
             description_placeholders={
                 "lock_count": str(len(self._lock_entities)),
                 "lock_list": lock_list,
