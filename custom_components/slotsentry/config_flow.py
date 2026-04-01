@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.0
+Revision: 1.1
 """
 
 from __future__ import annotations
@@ -250,6 +250,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({}),
+            last_step=False,
         )
 
     # ------------------------------------------------------------------
@@ -285,11 +286,16 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 return await self.async_step_code_length()
 
         lock_options = _build_lock_options(available_locks)
-        available_ids = [lock["entity_id"] for lock in available_locks]
+        # On first visit default to all locks; on back-navigation restore previous selection.
+        default_ids = (
+            self._lock_entities
+            if self._lock_entities
+            else [lock["entity_id"] for lock in available_locks]
+        )
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_LOCK_ENTITIES, default=available_ids): SelectSelector(
+                vol.Required(CONF_LOCK_ENTITIES, default=default_ids): SelectSelector(
                     SelectSelectorConfig(
                         options=lock_options,
                         multiple=True,
@@ -303,6 +309,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="locks",
             data_schema=schema,
             errors=errors,
+            last_step=False,
         )
 
     # ------------------------------------------------------------------
@@ -320,6 +327,16 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             default_long,
             self._discovery_ok,
         ) = _suggest_code_length_defaults(self._discovered_code_lengths)
+
+        # On back-navigation, restore the user's previous choices.
+        if self._code_length_mode == CODE_LENGTH_DUAL:
+            suggest_dual = True
+            if self._code_length_short is not None:
+                default_short = self._code_length_short
+            if self._code_length_long is not None:
+                default_long = self._code_length_long
+        elif self._code_length_single is not None:
+            default_single = self._code_length_single
 
         errors: dict[str, str] = {}
 
@@ -380,6 +397,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="code_length",
             data_schema=schema,
             errors=errors,
+            last_step=False,
             description_placeholders={
                 "discovery_notice": (
                     "Code lengths detected from your locks — defaults reflect what was found."
@@ -450,12 +468,15 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_LOCKOUT_ENABLED, default=False): bool,
+                vol.Required(
+                    CONF_LOCKOUT_ENABLED, default=self._lockout_enabled
+                ): bool,
                 vol.Optional(CONF_LOCKOUT_TRIGGER_ENTITY): EntitySelector(
                     EntitySelectorConfig()
                 ),
                 vol.Optional(
-                    CONF_LOCKOUT_TARGET_STATE, default="on"
+                    CONF_LOCKOUT_TARGET_STATE,
+                    default=self._lockout_target_state or "on",
                 ): SelectSelector(
                     SelectSelectorConfig(
                         options=state_options,
@@ -465,7 +486,11 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Optional(
                     CONF_LOCKOUT_PARTICIPATING_LOCKS,
-                    default=list(self._lock_entities),
+                    default=(
+                        self._lockout_participating_locks
+                        if self._lockout_participating_locks
+                        else list(self._lock_entities)
+                    ),
                 ): SelectSelector(
                     SelectSelectorConfig(
                         options=participating_options,
@@ -480,6 +505,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="lockout",
             data_schema=schema,
             errors=errors,
+            last_step=False,
         )
 
     # ------------------------------------------------------------------
@@ -529,6 +555,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema({}),
+            last_step=True,
             description_placeholders={
                 "lock_count": str(len(self._lock_entities)),
                 "lock_names": ", ".join(lock_names),
