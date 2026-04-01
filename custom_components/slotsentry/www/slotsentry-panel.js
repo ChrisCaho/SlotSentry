@@ -3,6 +3,10 @@
  * Custom element: slotsentry-panel
  * Version: 2026.4.0a1
  *
+ * Copyright (c) 2026 Chris Caho
+ * SPDX-License-Identifier: MIT
+ * Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+ *
  * Single-file LitElement panel served via panel_custom at:
  *   /local/slotsentry/slotsentry-panel.js
  *

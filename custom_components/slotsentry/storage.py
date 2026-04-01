@@ -1,5 +1,9 @@
 """SlotSentry storage layer.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Manages persistent JSON storage via HA's homeassistant.helpers.storage.Store,
 which provides atomic writes and built-in file locking.
 

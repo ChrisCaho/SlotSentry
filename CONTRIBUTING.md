@@ -1,5 +1,7 @@
 # Contributing to SlotSentry
 
+Copyright (c) 2026 Chris Caho — Licensed under the [MIT License](LICENSE).
+
 Thank you for your interest in contributing to SlotSentry! This document outlines the process and expectations for contributing code, documentation, and bug reports.
 
 ## Table of Contents

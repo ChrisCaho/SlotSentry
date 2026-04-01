@@ -1,5 +1,9 @@
 """SlotSentry — Z-Wave Lock Code Manager.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Revision: 1.1
 """
 

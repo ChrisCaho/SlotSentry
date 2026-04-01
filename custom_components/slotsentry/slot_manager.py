@@ -1,5 +1,9 @@
 """SlotSentry SlotManager — central orchestrator for slot state and lock pushes.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Owns all slot state, coordinates disk persistence via SlotSentryStore,
 delegates lock operations to LockCommitMachine instances, and fires HA
 events so sensor entities can reactively update.

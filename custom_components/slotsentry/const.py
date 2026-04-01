@@ -1,4 +1,9 @@
-"""SlotSentry constants."""
+"""SlotSentry constants.
+
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+"""
 
 from __future__ import annotations
 

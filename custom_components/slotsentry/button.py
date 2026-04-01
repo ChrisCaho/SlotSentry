@@ -1,5 +1,9 @@
 """SlotSentry button platform — Push All action button.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Exposes one ButtonEntity per config entry.  When pressed it delegates to
 SlotManager.async_push_all(), which pushes every out-of-sync slot to all
 configured locks in parallel.

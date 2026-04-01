@@ -1,5 +1,9 @@
 """SlotSentry WebSocket API — frontend-facing command handlers.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Registers all WebSocket commands that the SlotSentry frontend panel calls to
 manage slots and trigger lock pushes.  Each command is bound to a constant
 from const.py so that command strings are never hardcoded here.

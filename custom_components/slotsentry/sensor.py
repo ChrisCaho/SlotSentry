@@ -1,5 +1,9 @@
 """SlotSentry sensor platform — per-lock sync status and overall summary.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Exposes one SyncStatusSensor per configured lock and one OverallStatusSensor
 per config entry.  All sensors are event-driven (no polling); they refresh
 their state when the SlotManager fires EVENT_PUSH_STATUS_CHANGED.

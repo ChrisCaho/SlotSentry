@@ -1,5 +1,9 @@
 """SlotSentry commit state machine.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Manages the workflow for pushing codes from SlotSentry storage to physical
 locks. One LockCommitMachine instance per lock entity; all dirty slots for
 that lock are processed sequentially within a single asyncio Task.

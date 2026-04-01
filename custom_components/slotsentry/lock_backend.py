@@ -1,5 +1,9 @@
 """SlotSentry lock backend protocol and Z-Wave JS implementation.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Revision: 1.0
 
 Defines the LockBackend Protocol that all lock backends must implement,

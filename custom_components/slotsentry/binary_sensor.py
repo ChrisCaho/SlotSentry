@@ -1,5 +1,9 @@
 """SlotSentry binary_sensor platform — keypad lockout active indicator.
 
+Copyright (c) 2026 Chris Caho
+SPDX-License-Identifier: MIT
+Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
+
 Creates one BinarySensorEntity per config entry when keypad lockout is
 enabled.  The sensor is ON when the configured trigger entity equals the
 target state, and OFF otherwise.  State is updated reactively via
