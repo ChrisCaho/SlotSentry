@@ -8,34 +8,46 @@
       },
       "locks": {
         "title": "Select Z-Wave Locks",
-        "description": "Select all locks you want SlotSentry to manage. The number of available slots will be determined by the lock with the smallest capacity.",
+        "description": "Select all locks you want SlotSentry to manage. The number of available slots will be determined by the lock with the smallest capacity.{unavailable_notice}",
         "data": {
           "lock_entities": "Locks to manage"
         }
       },
-      "code_length": {
+      "code_length_mode": {
         "title": "Code Length Configuration",
-        "description": "Configure the PIN code length(s) for your locks. If your locks accept different PIN lengths, enable two code lengths.",
+        "description": "{discovery_notice}\n\nIf your locks accept different PIN lengths (e.g., some use 4 digits and others use 6), enable two code lengths. Otherwise, keep this off for a single length.",
         "data": {
-          "code_length_mode": "Support two code lengths (Long + Short)",
-          "code_length_single": "Code length (digits per PIN)",
+          "code_length_mode": "Support two code lengths (Short + Long)"
+        }
+      },
+      "code_length_single": {
+        "title": "Code Length",
+        "description": "Set the PIN code length that all your locks will use.",
+        "data": {
+          "code_length_single": "Code length"
+        }
+      },
+      "code_length_dual": {
+        "title": "Code Lengths — Short & Long",
+        "description": "Set the short and long code lengths. Short must be less than long. Each lock receives the code that matches its supported length.",
+        "data": {
           "code_length_short": "Short code length",
           "code_length_long": "Long code length"
         }
       },
       "lockout": {
         "title": "Keypad Lockout — Optional",
-        "description": "SlotSentry can automatically disable lock keypads on selected locks when a lockout trigger entity reaches a target state.",
+        "description": "SlotSentry can disable lock keypads when a trigger entity reaches one or more target states (e.g., when your alarm is armed).\n\nSelect the trigger entity, then choose which state(s) activate the lockout. You can select multiple states or type custom values.",
         "data": {
-          "lockout_enabled": "Enable Keypad Lockout",
+          "lockout_enabled": "Enable keypad lockout",
           "lockout_trigger_entity": "Lockout trigger entity",
-          "lockout_target_state": "Target state (lockout active when entity equals this)",
+          "lockout_target_states": "Target states (lockout active when entity matches any of these)",
           "lockout_participating_locks": "Participating locks"
         }
       },
       "confirm": {
         "title": "Review & Confirm",
-        "description": "Review your configuration before finishing. After setup, open the SlotSentry panel from the sidebar to begin entering codes."
+        "description": "Review your configuration:\n\n**Locks** ({lock_count}):\n{lock_list}\n\n**Slots:** {slot_count}\n**Code Length:** {code_length_mode} — {code_lengths}\n**Keypad Lockout:** {lockout_summary}\n**Secure Mode:** {secure_mode}\n\nClick **Submit** to finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
       }
     },
     "abort": {
@@ -46,6 +58,7 @@
       "no_locks_selected": "At least one lock must be selected.",
       "short_gte_long": "Short code length must be less than long code length.",
       "no_lockout_locks": "At least one lock must participate in lockout.",
+      "no_lockout_states": "At least one target state must be selected when lockout is enabled.",
       "duplicate_label": "Slot labels must be unique."
     }
   },

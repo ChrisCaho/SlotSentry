@@ -82,7 +82,9 @@ CONF_SLOT_COUNT = "slot_count"
 CONF_SECURE_MODE = "secure_mode"
 CONF_LOCKOUT_ENABLED = "lockout_enabled"
 CONF_LOCKOUT_TRIGGER_ENTITY = "lockout_trigger_entity"
-CONF_LOCKOUT_TARGET_STATE = "lockout_target_state"
+CONF_LOCKOUT_TARGET_STATE = "lockout_target_state"  # Legacy single-state key
+CONF_LOCKOUT_TARGET_STATES = "lockout_target_states"
+MAX_LOCKOUT_STATES = 4
 CONF_LOCKOUT_PARTICIPATING_LOCKS = "lockout_participating_locks"
 
 # Code length modes

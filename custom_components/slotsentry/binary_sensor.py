@@ -9,7 +9,7 @@ enabled.  The sensor is ON when the configured trigger entity equals the
 target state, and OFF otherwise.  State is updated reactively via
 async_track_state_change_event; no polling is performed.
 
-Revision: 1.0
+Revision: 1.1
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from . import SlotSentryConfigEntry
 from .const import (
     CONF_LOCKOUT_ENABLED,
     CONF_LOCKOUT_TARGET_STATE,
+    CONF_LOCKOUT_TARGET_STATES,
     CONF_LOCKOUT_TRIGGER_ENTITY,
     DOMAIN,
 )
@@ -64,11 +65,17 @@ async def async_setup_entry(
         return
 
     trigger_entity: str | None = entry.data.get(CONF_LOCKOUT_TRIGGER_ENTITY)
-    target_state: str | None = entry.data.get(CONF_LOCKOUT_TARGET_STATE)
 
-    if not trigger_entity or target_state is None:
+    # Support both new multi-state and legacy single-state config keys.
+    target_states: list[str] = entry.data.get(CONF_LOCKOUT_TARGET_STATES, [])
+    if not target_states:
+        legacy = entry.data.get(CONF_LOCKOUT_TARGET_STATE)
+        if legacy:
+            target_states = [legacy]
+
+    if not trigger_entity or not target_states:
         _LOGGER.warning(
-            "Lockout is enabled for entry %s but trigger_entity or target_state "
+            "Lockout is enabled for entry %s but trigger_entity or target_states "
             "is missing from config — binary sensor will not be created.",
             entry.entry_id,
         )
@@ -79,7 +86,7 @@ async def async_setup_entry(
             KeypadLockoutSensor(
                 entry_id=entry.entry_id,
                 trigger_entity=trigger_entity,
-                target_state=target_state,
+                target_states=target_states,
             )
         ]
     )
@@ -94,7 +101,7 @@ class KeypadLockoutSensor(BinarySensorEntity):
     """Indicates whether the keypad lockout is currently active.
 
     State:
-        ON  — lockout is active (trigger entity state == target state).
+        ON  — lockout is active (trigger entity state matches any target state).
         OFF — lockout is not active.
 
     Device class: LOCK (ON = locked/secured, aligns with lockout-active
@@ -110,7 +117,7 @@ class KeypadLockoutSensor(BinarySensorEntity):
         self,
         entry_id: str,
         trigger_entity: str,
-        target_state: str,
+        target_states: list[str],
     ) -> None:
         """Initialise the keypad lockout binary sensor.
 
@@ -118,12 +125,12 @@ class KeypadLockoutSensor(BinarySensorEntity):
             entry_id:       The config entry ID that owns this entity.
             trigger_entity: The HA entity ID to watch for the lockout
                             trigger condition.
-            target_state:   The state value of trigger_entity that means
-                            lockout is active.
+            target_states:  State values of trigger_entity that activate
+                            lockout (any match = lockout active).
         """
         self._entry_id = entry_id
         self._trigger_entity = trigger_entity
-        self._target_state = target_state
+        self._target_states = target_states
 
         self._attr_unique_id = f"slotsentry_{entry_id}_lockout"
         self.entity_id = "binary_sensor.slotsentry_keypad_lockout"
@@ -175,12 +182,12 @@ class KeypadLockoutSensor(BinarySensorEntity):
             )
             return
 
-        self._attr_is_on = trigger_state.state == self._target_state
+        self._attr_is_on = trigger_state.state in self._target_states
         _LOGGER.debug(
-            "Lockout sensor updated: trigger=%s state=%r target=%r → is_on=%s",
+            "Lockout sensor updated: trigger=%s state=%r targets=%r → is_on=%s",
             self._trigger_entity,
             trigger_state.state,
-            self._target_state,
+            self._target_states,
             self._attr_is_on,
         )
 
