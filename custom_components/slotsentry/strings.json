@@ -1,0 +1,80 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Welcome to SlotSentry",
+        "description": "SlotSentry gives you a single place to manage PIN codes across all your Z-Wave locks.\n\nThis wizard will discover your locks, configure code lengths, and optionally set up a keypad lockout trigger.\n\nSecure Mode can be enabled later via Reconfigure.",
+        "data": {}
+      },
+      "locks": {
+        "title": "Select Z-Wave Locks",
+        "description": "Select all locks you want SlotSentry to manage. The number of available slots will be determined by the lock with the smallest capacity.",
+        "data": {
+          "lock_entities": "Locks to manage"
+        }
+      },
+      "code_length": {
+        "title": "Code Length Configuration",
+        "description": "Configure the PIN code length(s) for your locks. If your locks accept different PIN lengths, enable two code lengths.",
+        "data": {
+          "code_length_mode": "Support two code lengths (Long + Short)",
+          "code_length_single": "Code length (digits per PIN)",
+          "code_length_short": "Short code length",
+          "code_length_long": "Long code length"
+        }
+      },
+      "lockout": {
+        "title": "Keypad Lockout — Optional",
+        "description": "SlotSentry can automatically disable lock keypads on selected locks when a lockout trigger entity reaches a target state.",
+        "data": {
+          "lockout_enabled": "Enable Keypad Lockout",
+          "lockout_trigger_entity": "Lockout trigger entity",
+          "lockout_target_state": "Target state (lockout active when entity equals this)",
+          "lockout_participating_locks": "Participating locks"
+        }
+      },
+      "confirm": {
+        "title": "Review & Confirm",
+        "description": "Review your configuration before finishing. After setup, open the SlotSentry panel from the sidebar to begin entering codes."
+      }
+    },
+    "abort": {
+      "no_zwave_locks": "No Z-Wave lock entities found. Ensure Z-Wave JS is configured and locks are paired.",
+      "already_configured": "SlotSentry is already configured."
+    },
+    "error": {
+      "no_locks_selected": "At least one lock must be selected.",
+      "short_gte_long": "Short code length must be less than long code length.",
+      "no_lockout_locks": "At least one lock must participate in lockout.",
+      "duplicate_label": "Slot labels must be unique."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "sync_status": {
+        "name": "Lock sync status"
+      },
+      "overall_status": {
+        "name": "Overall sync status"
+      }
+    },
+    "binary_sensor": {
+      "keypad_lockout": {
+        "name": "Keypad lockout"
+      }
+    },
+    "button": {
+      "push_all": {
+        "name": "Push all codes"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Reconfigure SlotSentry",
+        "description": "Modify your SlotSentry configuration."
+      }
+    }
+  }
+}
