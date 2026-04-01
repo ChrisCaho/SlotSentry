@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a1
+ * Version: 2026.4.0a2
  *
  * Copyright (c) 2026 Chris Caho
  * SPDX-License-Identifier: MIT

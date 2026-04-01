@@ -7,7 +7,7 @@ Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a1"
+VERSION = "2026.4.0a2"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 1

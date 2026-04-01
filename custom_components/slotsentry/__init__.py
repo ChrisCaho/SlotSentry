@@ -4,15 +4,21 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.1
+Revision: 1.2
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.components.frontend import (
+    async_register_built_in_panel,
+    async_remove_panel,
+)
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
@@ -111,25 +117,15 @@ async def async_unload_entry(
             await entry.runtime_data.slot_manager.async_shutdown()
 
         # Remove sidebar panel
-        hass.components.frontend.async_remove_panel(DOMAIN)
+        async_remove_panel(hass, DOMAIN)
         _LOGGER.debug("SlotSentry sidebar panel removed")
 
     return unload_ok
 
 
-async def _async_register_panel(hass: HomeAssistant) -> None:
-    """Register the SlotSentry sidebar panel.
-
-    Copies the JS file from the integration's www/ directory to HA's
-    www/slotsentry/ so that it's served at /local/slotsentry/. Then
-    registers the panel_custom entry.
-    """
-    import shutil
-    from pathlib import Path
-
-    # Source: inside the integration package
+def _copy_panel_js(hass: HomeAssistant) -> None:
+    """Copy the panel JS file to HA's www directory (runs in executor)."""
     src = Path(__file__).parent / "www" / "slotsentry-panel.js"
-    # Destination: HA config www directory
     dst_dir = Path(hass.config.path("www", "slotsentry"))
     dst = dst_dir / "slotsentry-panel.js"
 
@@ -140,7 +136,19 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     else:
         _LOGGER.warning("Panel JS source not found at %s", src)
 
-    hass.components.frontend.async_register_built_in_panel(
+
+async def _async_register_panel(hass: HomeAssistant) -> None:
+    """Register the SlotSentry sidebar panel.
+
+    Copies the JS file from the integration's www/ directory to HA's
+    www/slotsentry/ so that it's served at /local/slotsentry/. Then
+    registers the panel_custom entry.
+    """
+    # File I/O must run in the executor to avoid blocking the event loop.
+    await hass.async_add_executor_job(_copy_panel_js, hass)
+
+    async_register_built_in_panel(
+        hass,
         component_name="custom",
         sidebar_title="SlotSentry",
         sidebar_icon="mdi:lock-smart",
