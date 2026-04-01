@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+VERSION = "2026-4-0.0.1"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 1

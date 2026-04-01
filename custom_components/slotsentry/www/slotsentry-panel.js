@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Revision: 1.0
+ * Version: 2026-4-0.0.1
  *
  * Single-file LitElement panel served via panel_custom at:
  *   /local/slotsentry/slotsentry-panel.js
