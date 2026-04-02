@@ -1,15 +1,15 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a3
- * Revision: 1.1
+ * Version: 2026.4.0a4
+ * Revision: 2.3
  *
  * Copyright (c) 2026 Chris Caho
  * SPDX-License-Identifier: MIT
  * Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
  *
- * Single-file LitElement panel served via panel_custom at:
- *   /local/slotsentry/slotsentry-panel.js
+ * Pure vanilla web component — no LitElement dependency.
+ * Uses innerHTML + event delegation for reliable rendering.
  *
  * WebSocket commands used:
  *   slotsentry/get_slots   — load all slots
@@ -20,830 +20,165 @@
  *   slotsentry/get_status  — per-lock sync summary
  */
 
-// ---------------------------------------------------------------------------
-// LitElement acquisition — try HA's internal registry first, fall back to
-// an improved shim that handles nested templates and event bindings.
-// ---------------------------------------------------------------------------
-
-// Attempt to steal LitElement from an element HA has already registered.
-// HA's own elements inherit from LitElement, so the prototype chain gives us
-// the real class including html/css tagged template literals.
-function _tryGetHALitElement() {
-  const candidates = [
-    "home-assistant",
-    "ha-panel-lovelace",
-    "ha-sidebar",
-    "ha-card",
-  ];
-  for (const tag of candidates) {
-    const ctor = customElements.get(tag);
-    if (!ctor) continue;
-    // Walk up the prototype chain to find a constructor whose name is
-    // "LitElement" or which has the 'render' / '_$litElement$' marker.
-    let proto = Object.getPrototypeOf(ctor.prototype);
-    while (proto && proto !== HTMLElement.prototype && proto !== Object.prototype) {
-      const c = proto.constructor;
-      if (
-        (c && c.name === "LitElement") ||
-        (c && typeof c.finalize === "function" && typeof c.addInitializer === "function")
-      ) {
-        return c;
-      }
-      proto = Object.getPrototypeOf(proto);
-    }
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Shim infrastructure — used only when HA's LitElement is unavailable.
-// ---------------------------------------------------------------------------
-
-// Handler registry for event bindings inside the shim.
-const _shimHandlers = new Map();
-let _shimHandlerSeq = 0;
-
-/**
- * Recursively flatten a template result (or any value) to an HTML string.
- * Functions are registered in _shimHandlers and replaced with a sentinel
- * attribute value so the post-render DOM walk can bind them.
- *
- * LitElement template directive syntax is converted here:
- *   @event="..."   →  data-shim-on-event="handler_N"
- *   ?attr="..."    →  data-shim-bool-attr="N"  (truthy) or omitted
- *   .prop="..."    →  data-shim-prop-prop="N"
- */
-function _flattenTemplate(tmpl) {
-  if (tmpl == null || tmpl === false || tmpl === undefined) return "";
-  if (typeof tmpl === "string") return tmpl;
-  if (typeof tmpl === "number" || typeof tmpl === "boolean") return String(tmpl);
-  if (Array.isArray(tmpl)) return tmpl.map(_flattenTemplate).join("");
-  if (tmpl.strings) {
-    // This is a { strings, values } template result.
-    return tmpl.strings.reduce((acc, s, i) => {
-      if (i >= tmpl.values.length) return acc + s;
-      const val = tmpl.values[i];
-
-      // Inspect the preceding static string to detect LitElement directives.
-      // The directive token is the last attribute-like token at the end of `s`.
-      // e.g.  `... @click="`  or  `... ?disabled="`  or  `... .value="`
-      const attrMatch = s.match(/[\s;](@|[?.])([\w-]+)="$/);
-      if (attrMatch) {
-        const [fullMatch, prefix, attrName] = attrMatch;
-        // Keep everything up to (but not including) the directive token.
-        // fullMatch starts with a whitespace/semicolon separator which we preserve.
-        const trimmedS = s.slice(0, s.lastIndexOf(fullMatch) + 1);
-
-        if (prefix === "@") {
-          // Event binding: @eventname="${handler}"
-          // Replace with data-shim-on-eventname="N"
-          if (typeof val === "function") {
-            const id = ++_shimHandlerSeq;
-            _shimHandlers.set(id, val);
-            return acc + trimmedS + `data-shim-on-${attrName}="${id}"`;
-          }
-          return acc + trimmedS;
-        }
-
-        if (prefix === "?") {
-          // Boolean attribute: ?attr="${bool}"
-          if (val) {
-            return acc + trimmedS + `${attrName}=""`;
-          }
-          return acc + trimmedS;
-        }
-
-        if (prefix === ".") {
-          // Property binding: .prop="${value}"
-          const id = ++_shimHandlerSeq;
-          // Store the value (not necessarily a function)
-          _shimHandlers.set(id, val);
-          return acc + trimmedS + `data-shim-prop-${attrName}="${id}"`;
-        }
-      }
-
-      // Plain interpolation: recursively flatten
-      return acc + s + _flattenTemplate(val);
-    }, "");
-  }
-  return String(tmpl);
-}
-
-/**
- * After setting innerHTML on an element, walk all descendants and process
- * shim data attributes, attaching event listeners, setting properties,
- * and applying boolean attributes.
- */
-function _processShimBindings(root) {
-  // We need to visit all elements — querySelectorAll works on fragments.
-  const all = root.querySelectorAll ? root.querySelectorAll("*") : [];
-  for (const el of all) {
-    const attrs = Array.from(el.attributes);
-    for (const attr of attrs) {
-      const name = attr.name;
-      const rawId = parseInt(attr.value, 10);
-
-      if (name.startsWith("data-shim-on-")) {
-        // Event binding
-        const eventName = name.slice("data-shim-on-".length);
-        const handler = _shimHandlers.get(rawId);
-        if (handler) {
-          el.addEventListener(eventName, handler);
-          _shimHandlers.delete(rawId);
-        }
-        el.removeAttribute(name);
-      } else if (name.startsWith("data-shim-prop-")) {
-        // Property binding
-        const propName = name.slice("data-shim-prop-".length);
-        const val = _shimHandlers.get(rawId);
-        if (val !== undefined) {
-          el[propName] = val;
-          _shimHandlers.delete(rawId);
-        }
-        el.removeAttribute(name);
-      }
-      // Boolean attrs were already handled inline during flattening (either
-      // emitted as `attrname=""` or omitted entirely), so nothing to do here.
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Build the { LitElement, html, css } triple.
-// ---------------------------------------------------------------------------
-
-const { LitElement, html, css } = (() => {
-  // --- Attempt 1: real LitElement from HA's registry ---
-  const realLit = _tryGetHALitElement();
-  if (realLit) {
-    // html and css come from the 'lit' module; they're available on the
-    // prototype chain or via the static properties of the element itself.
-    // HA 2023+ bundles lit and exposes html/css via module exports that
-    // are *not* directly accessible as globals.  However, the tagged template
-    // functions produce TemplateResult / CSSResult objects — if we have the
-    // real LitElement we need the matching html/css.  If they aren't on the
-    // constructor we fall through to a shim that's compatible enough.
-    const haHtml = realLit.html || (window.lit && window.lit.html);
-    const haCss  = realLit.css  || (window.lit && window.lit.css);
-    if (haHtml && haCss) {
-      return { LitElement: realLit, html: haHtml, css: haCss };
-    }
-    // We have the class but not the template functions — still use the class
-    // with our shim html/css (the class's _doRender won't be ours, so fall
-    // through fully to the shim below so everything is consistent).
-  }
-
-  // --- Attempt 2: full shim ---
-  class LitElement extends HTMLElement {
-    static get properties() { return {}; }
-    static get styles()     { return []; }
-
-    constructor() {
-      super();
-      this.attachShadow({ mode: "open" });
-      this._props = {};
-    }
-
-    set hass(v)  { this._props.hass  = v; this._requestRender(); }
-    get hass()   { return this._props.hass; }
-    set panel(v) { this._props.panel = v; this._requestRender(); }
-    get panel()  { return this._props.panel; }
-
-    connectedCallback() { this._requestRender(); }
-
-    _requestRender() {
-      if (this._renderScheduled) return;
-      this._renderScheduled = true;
-      Promise.resolve().then(() => {
-        this._renderScheduled = false;
-        this._doRender();
-      });
-    }
-
-    _doRender() {
-      const tmpl = this.render();
-      if (!tmpl && tmpl !== 0) return;
-
-      // Rebuild shadow DOM
-      this.shadowRoot.innerHTML = "";
-
-      // Inject styles
-      const styles = this.constructor.styles || [];
-      const styleEl = document.createElement("style");
-      styleEl.textContent = (Array.isArray(styles) ? styles : [styles])
-        .map(s => (s && s.cssText) ? s.cssText : String(s))
-        .join("\n");
-      this.shadowRoot.appendChild(styleEl);
-
-      // Render template to HTML string, encoding directives as data-shim-* attrs
-      const htmlStr = _flattenTemplate(tmpl);
-
-      // Parse into real DOM nodes
-      const div = document.createElement("div");
-      div.innerHTML = htmlStr;
-
-      // Post-process: attach event listeners, set properties
-      _processShimBindings(div);
-
-      // Move children into shadow root
-      while (div.firstChild) {
-        this.shadowRoot.appendChild(div.firstChild);
-      }
-    }
-
-    render() { return null; }
-    requestUpdate() { this._requestRender(); }
-    // Stub updated() so subclass override doesn't crash
-    updated(_changedProps) {}
-  }
-
-  const html = (strings, ...values) => ({ strings, values });
-  const css  = (strings, ...values) => ({
-    cssText: strings.reduce(
-      (acc, s, i) => acc + s + (values[i] != null ? String(values[i].cssText || values[i]) : ""),
-      ""
-    ),
-  });
-
-  return { LitElement, html, css };
-})();
-
-// ---------------------------------------------------------------------------
-// SlotSentryPanel
-// ---------------------------------------------------------------------------
-
-class SlotSentryPanel extends LitElement {
-
-  static get properties() {
-    return {
-      hass:            { type: Object },
-      panel:           { type: Object },
-      _entryId:        { type: String,  state: true },
-      _slots:          { type: Array,   state: true },
-      _status:         { type: Object,  state: true },
-      _loading:        { type: Boolean, state: true },
-      _pushing:        { type: Boolean, state: true },
-      _pushProgress:   { type: String,  state: true },
-      _toasts:         { type: Array,   state: true },
-      _revealMap:      { type: Object,  state: true },
-      _savingSlots:    { type: Object,  state: true },
-      _deletingSlots:  { type: Object,  state: true },
-      _pushingLocks:   { type: Object,  state: true },
-      _error:          { type: String,  state: true },
-      _editValues:     { type: Object,  state: true },
-    };
-  }
-
-  static get styles() {
-    return css`
-      :host {
-        display: block;
-        height: 100%;
-        overflow-y: auto;
-        background: var(--primary-background-color, #f0f0f0);
-        color: var(--primary-text-color, #212121);
-        font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
-        font-size: 14px;
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Header                                                              */
-      /* ------------------------------------------------------------------ */
-
-      .header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 16px 20px;
-        background: var(--primary-color, #03a9f4);
-        color: #fff;
-        position: sticky;
-        top: 0;
-        z-index: 100;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-      }
-
-      .header h1 {
-        margin: 0;
-        font-size: 20px;
-        font-weight: 500;
-        letter-spacing: 0.01em;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-
-      .header-icon {
-        width: 28px;
-        height: 28px;
-        fill: #fff;
-      }
-
-      .header-actions {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-
-      .status-badge {
-        padding: 4px 10px;
-        border-radius: 12px;
-        font-size: 12px;
-        font-weight: 600;
-        background: rgba(255,255,255,0.2);
-        color: #fff;
-      }
-
-      .status-badge.synced    { background: rgba(76,175,80,0.85); }
-      .status-badge.out_of_sync { background: rgba(255,152,0,0.85); }
-      .status-badge.error     { background: rgba(244,67,54,0.85); }
-      .status-badge.pushing   { background: rgba(33,150,243,0.85); }
-
-      /* ------------------------------------------------------------------ */
-      /* Buttons                                                             */
-      /* ------------------------------------------------------------------ */
-
-      .btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 7px 14px;
-        border: none;
-        border-radius: 6px;
-        cursor: pointer;
-        font-size: 13px;
-        font-weight: 500;
-        transition: opacity 0.15s, transform 0.1s;
-        outline: none;
-      }
-      .btn:active { transform: scale(0.97); }
-      .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
-
-      .btn-primary {
-        background: #fff;
-        color: var(--primary-color, #03a9f4);
-      }
-      .btn-primary:hover:not(:disabled) { background: rgba(255,255,255,0.85); }
-
-      .btn-save {
-        background: var(--primary-color, #03a9f4);
-        color: #fff;
-        padding: 5px 12px;
-        font-size: 12px;
-      }
-      .btn-save:hover:not(:disabled) { opacity: 0.85; }
-
-      .btn-delete {
-        background: transparent;
-        color: var(--error-color, #f44336);
-        border: 1px solid var(--error-color, #f44336);
-        padding: 5px 10px;
-        font-size: 12px;
-      }
-      .btn-delete:hover:not(:disabled) {
-        background: var(--error-color, #f44336);
-        color: #fff;
-      }
-
-      .btn-push-lock {
-        background: transparent;
-        color: var(--primary-color, #03a9f4);
-        border: 1px solid var(--primary-color, #03a9f4);
-        padding: 5px 10px;
-        font-size: 12px;
-      }
-      .btn-push-lock:hover:not(:disabled) {
-        background: var(--primary-color, #03a9f4);
-        color: #fff;
-      }
-
-      .btn-icon {
-        background: transparent;
-        color: inherit;
-        padding: 4px;
-        border-radius: 4px;
-        opacity: 0.7;
-      }
-      .btn-icon:hover { opacity: 1; background: rgba(0,0,0,0.06); }
-      .btn-icon svg { display: block; }
-
-      /* ------------------------------------------------------------------ */
-      /* Main content                                                        */
-      /* ------------------------------------------------------------------ */
-
-      .content {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 20px 16px 40px;
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Loading / error states                                              */
-      /* ------------------------------------------------------------------ */
-
-      .loading-container, .error-container {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        padding: 60px 20px;
-        gap: 16px;
-        color: var(--secondary-text-color, #727272);
-      }
-
-      .spinner {
-        width: 40px;
-        height: 40px;
-        border: 3px solid var(--divider-color, #e0e0e0);
-        border-top-color: var(--primary-color, #03a9f4);
-        border-radius: 50%;
-        animation: spin 0.8s linear infinite;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-
-      .error-container {
-        color: var(--error-color, #f44336);
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Push progress bar                                                   */
-      /* ------------------------------------------------------------------ */
-
-      .push-progress-bar {
-        background: var(--card-background-color, #fff);
-        border: 1px solid var(--divider-color, #e0e0e0);
-        border-radius: 8px;
-        padding: 12px 16px;
-        margin-bottom: 16px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        font-size: 13px;
-        color: var(--primary-color, #03a9f4);
-      }
-
-      .push-progress-bar .spinner {
-        width: 20px;
-        height: 20px;
-        border-width: 2px;
-        flex-shrink: 0;
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Slot table                                                          */
-      /* ------------------------------------------------------------------ */
-
-      .section-title {
-        font-size: 13px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--secondary-text-color, #727272);
-        margin: 0 0 10px;
-        padding: 0;
-      }
-
-      .slot-card {
-        background: var(--card-background-color, #fff);
-        border-radius: 10px;
-        border: 1px solid var(--divider-color, #e0e0e0);
-        overflow: hidden;
-        margin-bottom: 20px;
-      }
-
-      .slot-table-wrap {
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        min-width: 640px;
-      }
-
-      thead tr {
-        background: var(--secondary-background-color, #fafafa);
-      }
-
-      th {
-        padding: 10px 12px;
-        text-align: left;
-        font-size: 11px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--secondary-text-color, #727272);
-        border-bottom: 2px solid var(--divider-color, #e0e0e0);
-        white-space: nowrap;
-      }
-
-      tbody tr {
-        border-bottom: 1px solid var(--divider-color, #e0e0e0);
-        transition: background 0.1s;
-      }
-      tbody tr:last-child { border-bottom: none; }
-      tbody tr:hover { background: var(--secondary-background-color, #fafafa); }
-      tbody tr.slot-dirty { background: rgba(255,152,0,0.05); }
-
-      td {
-        padding: 8px 12px;
-        vertical-align: middle;
-      }
-
-      .slot-num {
-        font-weight: 700;
-        color: var(--secondary-text-color, #727272);
-        font-size: 13px;
-        min-width: 32px;
-        text-align: center;
-      }
-
-      .slot-input {
-        width: 100%;
-        padding: 6px 8px;
-        border: 1px solid var(--divider-color, #e0e0e0);
-        border-radius: 5px;
-        background: var(--primary-background-color, #f0f0f0);
-        color: var(--primary-text-color, #212121);
-        font-size: 13px;
-        font-family: inherit;
-        box-sizing: border-box;
-        transition: border-color 0.15s, box-shadow 0.15s;
-        min-width: 80px;
-      }
-      .slot-input:focus {
-        outline: none;
-        border-color: var(--primary-color, #03a9f4);
-        box-shadow: 0 0 0 2px rgba(3,169,244,0.15);
-      }
-
-      .code-cell {
-        position: relative;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        min-width: 120px;
-      }
-      .code-cell .slot-input { flex: 1; min-width: 0; padding-right: 30px; }
-
-      .reveal-btn {
-        position: absolute;
-        right: 4px;
-        background: transparent;
-        border: none;
-        cursor: pointer;
-        padding: 2px;
-        color: var(--secondary-text-color, #727272);
-        display: flex;
-        align-items: center;
-        border-radius: 3px;
-        transition: color 0.15s;
-      }
-      .reveal-btn:hover { color: var(--primary-color, #03a9f4); }
-      .reveal-btn svg { display: block; }
-
-      .enabled-toggle {
-        width: 18px;
-        height: 18px;
-        cursor: pointer;
-        accent-color: var(--primary-color, #03a9f4);
-      }
-
-      .actions-cell {
-        display: flex;
-        gap: 6px;
-        align-items: center;
-        white-space: nowrap;
-      }
-
-      .empty-slot td {
-        color: var(--secondary-text-color, #727272);
-        font-style: italic;
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Status section                                                      */
-      /* ------------------------------------------------------------------ */
-
-      .status-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-        gap: 12px;
-        margin-top: 4px;
-      }
-
-      .lock-card {
-        background: var(--card-background-color, #fff);
-        border: 1px solid var(--divider-color, #e0e0e0);
-        border-radius: 10px;
-        padding: 14px 16px;
-        transition: border-color 0.2s;
-      }
-      .lock-card.synced     { border-left: 4px solid #4caf50; }
-      .lock-card.out_of_sync { border-left: 4px solid #ff9800; }
-      .lock-card.uncertain  { border-left: 4px solid #9e9e9e; }
-      .lock-card.error      { border-left: 4px solid #f44336; }
-
-      .lock-name {
-        font-weight: 600;
-        font-size: 14px;
-        margin-bottom: 8px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-
-      .lock-state-pill {
-        font-size: 11px;
-        font-weight: 600;
-        padding: 2px 8px;
-        border-radius: 10px;
-        text-transform: uppercase;
-      }
-      .lock-state-pill.synced      { background: #e8f5e9; color: #388e3c; }
-      .lock-state-pill.out_of_sync { background: #fff3e0; color: #f57c00; }
-      .lock-state-pill.uncertain   { background: #f5f5f5; color: #757575; }
-      .lock-state-pill.error       { background: #ffebee; color: #c62828; }
-
-      .lock-counts {
-        display: flex;
-        gap: 14px;
-        font-size: 12px;
-        color: var(--secondary-text-color, #727272);
-        margin-top: 4px;
-      }
-
-      .lock-count-item {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-      }
-      .lock-count-item .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        flex-shrink: 0;
-      }
-      .dot-synced   { background: #4caf50; }
-      .dot-failed   { background: #f44336; }
-      .dot-uncertain { background: #9e9e9e; }
-      .dot-dirty    { background: #ff9800; }
-
-      .dirty-slots {
-        margin-top: 8px;
-        font-size: 11px;
-        color: var(--secondary-text-color, #727272);
-      }
-
-      .lock-actions {
-        margin-top: 10px;
-        display: flex;
-        justify-content: flex-end;
-      }
-
-      .no-locks {
-        color: var(--secondary-text-color, #727272);
-        font-style: italic;
-        font-size: 13px;
-        padding: 8px 0;
-      }
-
-      /* ------------------------------------------------------------------ */
-      /* Toast notifications                                                 */
-      /* ------------------------------------------------------------------ */
-
-      .toast-container {
-        position: fixed;
-        bottom: 24px;
-        left: 50%;
-        transform: translateX(-50%);
-        z-index: 9999;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 8px;
-        pointer-events: none;
-      }
-
-      .toast {
-        pointer-events: all;
-        padding: 10px 20px;
-        border-radius: 8px;
-        font-size: 13px;
-        font-weight: 500;
-        color: #fff;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-        animation: toast-in 0.2s ease, toast-out 0.3s ease 3.7s forwards;
-        max-width: 400px;
-        text-align: center;
-      }
-      @keyframes toast-in  { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-      @keyframes toast-out { from { opacity: 1; } to { opacity: 0; transform: translateY(8px); } }
-
-      .toast.success { background: #43a047; }
-      .toast.error   { background: #e53935; }
-      .toast.info    { background: #1e88e5; }
-
-      /* ------------------------------------------------------------------ */
-      /* Responsive                                                          */
-      /* ------------------------------------------------------------------ */
-
-      @media (max-width: 600px) {
-        .header { padding: 12px 14px; }
-        .header h1 { font-size: 17px; }
-        .content { padding: 12px 8px 32px; }
-        .status-grid { grid-template-columns: 1fr; }
-      }
-    `;
-  }
-
-  // -------------------------------------------------------------------------
-  // Lifecycle
-  // -------------------------------------------------------------------------
+class SlotSentryPanel extends HTMLElement {
 
   constructor() {
     super();
-    this._entryId      = null;
-    this._slots        = [];
-    this._status       = {};
-    this._loading      = true;
-    this._pushing      = false;
+    this.attachShadow({ mode: "open" });
+    this._hass = null;
+    this._panel = null;
+    this._entryId = null;
+    this._config = null;   // config entry data (locks, code_length_mode, etc.)
+    this._slots = [];
+    this._status = {};
+    this._loading = true;
+    this._pushing = false;
     this._pushProgress = "";
-    this._toasts       = [];
-    this._revealMap    = {};   // key: "long|short-<slotNum>" → bool
-    this._savingSlots  = {};   // slotNum → bool
-    this._deletingSlots = {};  // slotNum → bool
-    this._pushingLocks = {};   // lockEntity → bool
-    this._error        = null;
-    this._editValues   = {};   // slotNum → { label, long_code, short_code, enabled }
-    this._pushPollId   = null;
+    this._toasts = [];
+    this._revealMap = {};
+    this._savingSlots = {};
+    this._deletingSlots = {};
+    this._pushingLocks = {};
+    this._error = null;
+    this._editValues = {};
+    this._pushPollId = null;
     this._pushPollStart = 0;
+    this._initStarted = false;
+    this._renderScheduled = false;
+    this._updateAll = false;
+    this._dirty = false;
+    this._eventsBound = false;
+    this._savingAll = false;
+    this._nextToastId = 0;
   }
 
-  connectedCallback() {
-    super.connectedCallback && super.connectedCallback();
-    // Defer init until hass is available
-    if (this.hass) {
+  set hass(v) {
+    this._hass = v;
+    if (v && !this._initStarted) {
+      this._initStarted = true;
       this._init();
     }
   }
+  get hass() { return this._hass; }
 
-  disconnectedCallback() {
-    super.disconnectedCallback && super.disconnectedCallback();
-    this._stopPushPoll();
-  }
+  set panel(v) { this._panel = v; }
+  get panel() { return this._panel; }
 
-  // When hass is set (first time or updated), kick init if not done yet.
-  updated(changedProps) {
-    if (changedProps && changedProps.has("hass") && this.hass && !this._entryId && !this._loading === false) {
-      // _loading starts true — only init once
-      if (this._initStarted) return;
+  connectedCallback() {
+    if (!this._eventsBound) {
+      this._eventsBound = true;
+      this._bindEvents();
+    }
+    if (this._hass && !this._initStarted) {
       this._initStarted = true;
       this._init();
     }
   }
 
-  // -------------------------------------------------------------------------
+  disconnectedCallback() {
+    this._stopPushPoll();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  get _isDual() {
+    return this._config && this._config.code_length_mode === "dual";
+  }
+
+  get _lockEntities() {
+    return (this._config && this._config.lock_entities) || [];
+  }
+
+  _lockNames() {
+    return this._lockEntities.map(eid => {
+      if (this._hass && this._hass.states && this._hass.states[eid]) {
+        return this._hass.states[eid].attributes.friendly_name || eid;
+      }
+      return eid;
+    });
+  }
+
+  _modeSummary() {
+    if (!this._config) return "";
+    if (this._isDual) {
+      const l = this._config.code_length_long || "?";
+      const s = this._config.code_length_short || "?";
+      return "Long " + l + "-digit / Short " + s + "-digit";
+    }
+    const c = this._config.code_length_single || this._config.code_length_long || "?";
+    return c + "-digit";
+  }
+
+  _scheduleRender() {
+    if (this._renderScheduled) return;
+    this._renderScheduled = true;
+    requestAnimationFrame(() => {
+      this._renderScheduled = false;
+      this._render();
+    });
+  }
+
+  _esc(str) {
+    if (str == null) return "";
+    const d = document.createElement("div");
+    d.textContent = String(str);
+    return d.innerHTML;
+  }
+
+  // ---------------------------------------------------------------------------
   // Initialisation
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   async _init() {
-    this._initStarted = true;
     this._loading = true;
     this._error = null;
-    this.requestUpdate();
+    this._scheduleRender();
 
     try {
       await this._discoverEntryId();
     } catch (err) {
-      this._error = `Failed to discover config entry: ${err.message || err}`;
+      this._error = "Failed to discover config entry: " + (err.message || err);
       this._loading = false;
-      this.requestUpdate();
+      this._scheduleRender();
       return;
     }
 
     if (!this._entryId) {
       this._error = "No SlotSentry config entry found. Please set up the integration first.";
       this._loading = false;
-      this.requestUpdate();
+      this._scheduleRender();
       return;
     }
 
     await this._refresh();
     this._loading = false;
-    this.requestUpdate();
+    this._scheduleRender();
   }
 
   async _discoverEntryId() {
-    if (this.panel && this.panel.config && this.panel.config.entry_id) {
-      this._entryId = this.panel.config.entry_id;
-      return;
+    if (this._panel && this._panel.config && this._panel.config.entry_id) {
+      this._entryId = this._panel.config.entry_id;
     }
-    // Fallback: discover via config_entries/get
-    const entries = await this.hass.callWS({ type: "config_entries/get", domain: "slotsentry" });
-    if (entries && entries.length > 0) {
-      this._entryId = entries[0].entry_id;
+    // Discover entry ID via config_entries/get if not already known
+    if (!this._entryId) {
+      const entries = await this._hass.callWS({ type: "config_entries/get", domain: "slotsentry" });
+      if (entries && entries.length > 0) {
+        this._entryId = entries[0].entry_id;
+      }
+    }
+    // Load config data via our custom WS command (config_entries/get doesn't expose data)
+    if (this._entryId) {
+      try {
+        const result = await this._hass.callWS({
+          type: "slotsentry/get_config",
+          entry_id: this._entryId,
+        });
+        this._config = result.config || {};
+      } catch (err) {
+        this._config = {};
+      }
     }
   }
 
@@ -853,65 +188,94 @@ class SlotSentryPanel extends LitElement {
 
   async _loadSlots() {
     try {
-      const result = await this.hass.callWS({
+      const result = await this._hass.callWS({
         type: "slotsentry/get_slots",
         entry_id: this._entryId,
       });
       this._slots = result.slots || [];
-      // Seed edit values for new slots (don't overwrite existing edits)
       const next = { ...this._editValues };
       for (const slot of this._slots) {
         if (!next[slot.slot_number]) {
           next[slot.slot_number] = {
-            label:      slot.label      || "",
-            long_code:  slot.long_code  || "",
+            label: slot.label || "",
+            long_code: slot.long_code || "",
             short_code: slot.short_code || "",
-            enabled:    slot.enabled    ?? true,
+            enabled: slot.enabled ?? false,
           };
         }
       }
       this._editValues = next;
-      this.requestUpdate();
+      this._scheduleRender();
     } catch (err) {
-      this._toast(`Failed to load slots: ${err.message || err}`, "error");
+      this._toast("Failed to load slots: " + (err.message || err), "error");
     }
   }
 
   async _loadStatus() {
     try {
-      const result = await this.hass.callWS({
+      const result = await this._hass.callWS({
         type: "slotsentry/get_status",
         entry_id: this._entryId,
       });
       this._status = result.status || {};
-      this.requestUpdate();
+      this._scheduleRender();
     } catch (err) {
-      // Status is non-critical; don't show a blocking error
       this._status = {};
-      this.requestUpdate();
+      this._scheduleRender();
     }
   }
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Dirty tracking
+  // ---------------------------------------------------------------------------
+
+  _checkDirty() {
+    const wasDirty = this._dirty;
+    if (this._updateAll) { this._dirty = true; }
+    else {
+      this._dirty = false;
+      for (const slot of this._slots) {
+        const n = slot.slot_number;
+        const vals = this._editValues[n];
+        if (!vals) continue;
+        if (vals.label !== (slot.label || "") ||
+            vals.long_code !== (slot.long_code || "") ||
+            vals.short_code !== (slot.short_code || "") ||
+            vals.enabled !== (slot.enabled ?? false)) {
+          this._dirty = true;
+          break;
+        }
+      }
+    }
+    if (this._dirty !== wasDirty) this._scheduleRender();
+  }
+
+  _isRowDirty(slot) {
+    const n = slot.slot_number;
+    const vals = this._editValues[n];
+    if (!vals) return false;
+    return vals.label !== (slot.label || "") ||
+      vals.long_code !== (slot.long_code || "") ||
+      vals.short_code !== (slot.short_code || "") ||
+      vals.enabled !== (slot.enabled ?? false);
+  }
+
+  // ---------------------------------------------------------------------------
   // Slot actions
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   _onFieldInput(slotNumber, field, value) {
     const cur = this._editValues[slotNumber] || {};
-    this._editValues = {
-      ...this._editValues,
-      [slotNumber]: { ...cur, [field]: value },
-    };
-    this.requestUpdate();
+    this._editValues = { ...this._editValues, [slotNumber]: { ...cur, [field]: value } };
+    this._checkDirty();
+    // Don't full re-render on keystrokes — just track state
   }
 
   _onEnabledChange(slotNumber, checked) {
     const cur = this._editValues[slotNumber] || {};
-    this._editValues = {
-      ...this._editValues,
-      [slotNumber]: { ...cur, enabled: checked },
-    };
-    this.requestUpdate();
+    this._editValues = { ...this._editValues, [slotNumber]: { ...cur, enabled: checked } };
+    this._checkDirty();
+    this._scheduleRender();
   }
 
   async _saveSlot(slotNumber) {
@@ -919,144 +283,211 @@ class SlotSentryPanel extends LitElement {
     if (!vals) return;
 
     this._savingSlots = { ...this._savingSlots, [slotNumber]: true };
-    this.requestUpdate();
+    this._scheduleRender();
 
     try {
-      await this.hass.callWS({
-        type:        "slotsentry/set_slot",
-        entry_id:    this._entryId,
+      await this._hass.callWS({
+        type: "slotsentry/set_slot",
+        entry_id: this._entryId,
         slot_number: slotNumber,
-        label:       vals.label || "",
-        long_code:   vals.long_code || "",
-        short_code:  vals.short_code || "",
-        enabled:     !!vals.enabled,
+        label: vals.label || "",
+        long_code: vals.long_code || "",
+        short_code: vals.short_code || "",
+        enabled: !!vals.enabled,
       });
-      this._toast(`Slot ${slotNumber} saved.`, "success");
-      await this._refresh();
-    } catch (err) {
-      this._toast(`Save failed: ${err.message || err}`, "error");
-    } finally {
-      const s = { ...this._savingSlots };
-      delete s[slotNumber];
-      this._savingSlots = s;
-      this.requestUpdate();
-    }
-  }
-
-  async _deleteSlot(slotNumber) {
-    const confirmed = window.confirm(
-      `Clear slot ${slotNumber}? This will remove the label and codes and mark the slot for removal on the lock.`
-    );
-    if (!confirmed) return;
-
-    this._deletingSlots = { ...this._deletingSlots, [slotNumber]: true };
-    this.requestUpdate();
-
-    try {
-      await this.hass.callWS({
-        type:        "slotsentry/delete_slot",
-        entry_id:    this._entryId,
-        slot_number: slotNumber,
-      });
-      this._toast(`Slot ${slotNumber} cleared.`, "success");
-      // Remove cached edit values so they reload fresh
+      this._toast("Slot " + slotNumber + " saved.", "success");
+      // Clear cached edit for this slot so it reloads fresh
       const ev = { ...this._editValues };
       delete ev[slotNumber];
       this._editValues = ev;
       await this._refresh();
     } catch (err) {
-      this._toast(`Delete failed: ${err.message || err}`, "error");
+      this._toast("Save failed: " + (err.message || err), "error");
+    } finally {
+      const s = { ...this._savingSlots };
+      delete s[slotNumber];
+      this._savingSlots = s;
+      this._checkDirty();
+      this._scheduleRender();
+    }
+  }
+
+  async _deleteSlot(slotNumber) {
+    if (!window.confirm("Clear slot " + slotNumber + "? This will remove the label and codes.")) return;
+
+    this._deletingSlots = { ...this._deletingSlots, [slotNumber]: true };
+    this._scheduleRender();
+
+    try {
+      await this._hass.callWS({
+        type: "slotsentry/delete_slot",
+        entry_id: this._entryId,
+        slot_number: slotNumber,
+      });
+      this._toast("Slot " + slotNumber + " cleared.", "success");
+      const ev = { ...this._editValues };
+      delete ev[slotNumber];
+      this._editValues = ev;
+      await this._refresh();
+    } catch (err) {
+      this._toast("Delete failed: " + (err.message || err), "error");
     } finally {
       const s = { ...this._deletingSlots };
       delete s[slotNumber];
       this._deletingSlots = s;
-      this.requestUpdate();
+      this._checkDirty();
+      this._scheduleRender();
     }
   }
 
-  // -------------------------------------------------------------------------
+  async _saveAll() {
+    // Save every slot that has edits (or all if _updateAll)
+    const toSave = [];
+    for (const slot of this._slots) {
+      const n = slot.slot_number;
+      const vals = this._editValues[n];
+      if (!vals) continue;
+      if (this._updateAll || this._isRowDirty(slot)) {
+        toSave.push({ slot_number: n, ...vals });
+      }
+    }
+
+    if (!toSave.length) {
+      this._toast("No changes to save.", "info");
+      return;
+    }
+
+    this._savingAll = true;
+    this._pushProgress = "Saving " + toSave.length + " slot(s)\u2026";
+    this._scheduleRender();
+
+    let saved = 0;
+    let failed = 0;
+    for (const s of toSave) {
+      try {
+        await this._hass.callWS({
+          type: "slotsentry/set_slot",
+          entry_id: this._entryId,
+          slot_number: s.slot_number,
+          label: s.label || "",
+          long_code: s.long_code || "",
+          short_code: s.short_code || "",
+          enabled: !!s.enabled,
+        });
+        saved++;
+      } catch (err) {
+        failed++;
+      }
+    }
+
+    this._savingAll = false;
+    this._pushProgress = "";
+    this._updateAll = false;
+
+    if (failed) {
+      this._toast("Saved " + saved + " slot(s), " + failed + " failed.", "error");
+    } else {
+      this._toast("Saved " + saved + " slot(s).", "success");
+    }
+
+    // Clear all cached edits and reload
+    this._editValues = {};
+    await this._refresh();
+    this._checkDirty();
+    this._scheduleRender();
+  }
+
+  _discardAll() {
+    this._editValues = {};
+    this._updateAll = false;
+    // Re-seed from current slot data
+    for (const slot of this._slots) {
+      this._editValues[slot.slot_number] = {
+        label: slot.label || "",
+        long_code: slot.long_code || "",
+        short_code: slot.short_code || "",
+        enabled: slot.enabled ?? false,
+      };
+    }
+    this._dirty = false;
+    this._scheduleRender();
+  }
+
+  // ---------------------------------------------------------------------------
   // Push actions
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   async _pushAll() {
     if (this._pushing) return;
     this._pushing = true;
-    this._pushProgress = "Initiating push to all locks…";
-    this.requestUpdate();
+    this._pushProgress = "Initiating push to all locks\u2026";
+    this._scheduleRender();
 
     try {
-      await this.hass.callWS({
-        type:     "slotsentry/push_all",
-        entry_id: this._entryId,
-      });
+      await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId });
       this._toast("Push initiated for all locks.", "info");
       this._startPushPoll();
     } catch (err) {
-      this._toast(`Push failed: ${err.message || err}`, "error");
+      this._toast("Push failed: " + (err.message || err), "error");
       this._pushing = false;
       this._pushProgress = "";
-      this.requestUpdate();
+      this._scheduleRender();
     }
   }
 
   async _pushLock(lockEntity) {
     if (this._pushingLocks[lockEntity]) return;
     this._pushingLocks = { ...this._pushingLocks, [lockEntity]: true };
-    this.requestUpdate();
+    this._scheduleRender();
 
     try {
-      await this.hass.callWS({
-        type:        "slotsentry/push_lock",
-        entry_id:    this._entryId,
+      await this._hass.callWS({
+        type: "slotsentry/push_lock",
+        entry_id: this._entryId,
         lock_entity: lockEntity,
       });
-      this._toast(`Push initiated for ${this._lockDisplayName(lockEntity)}.`, "info");
-      // Brief poll for this lock
+      this._toast("Push initiated for " + this._lockDisplayName(lockEntity) + ".", "info");
       this._startPushPoll();
     } catch (err) {
-      this._toast(`Push failed for ${this._lockDisplayName(lockEntity)}: ${err.message || err}`, "error");
+      this._toast("Push failed: " + (err.message || err), "error");
     } finally {
       const s = { ...this._pushingLocks };
       delete s[lockEntity];
       this._pushingLocks = s;
-      this.requestUpdate();
+      this._scheduleRender();
     }
   }
 
   _startPushPoll() {
     this._stopPushPoll();
     this._pushPollStart = Date.now();
-    this._pushProgress = "Syncing…";
+    this._pushProgress = "Syncing\u2026";
     this._pushing = true;
-    this.requestUpdate();
+    this._scheduleRender();
 
     this._pushPollId = setInterval(async () => {
       await this._loadStatus();
       const elapsed = Date.now() - this._pushPollStart;
-      const allSynced = this._allLocksSynced();
-
-      if (allSynced) {
+      if (this._allLocksSynced()) {
         this._stopPushPoll();
         this._pushing = false;
         this._pushProgress = "";
         this._toast("All locks synced successfully.", "success");
-        this.requestUpdate();
+        this._scheduleRender();
         return;
       }
-
       if (elapsed >= 30000) {
         this._stopPushPoll();
         this._pushing = false;
         this._pushProgress = "";
         this._toast("Push timed out. Check lock status below.", "error");
-        this.requestUpdate();
+        this._scheduleRender();
         return;
       }
-
       const syncedLocks = Object.values(this._status).filter(s => s.state === "synced").length;
-      const totalLocks  = Object.keys(this._status).length;
-      this._pushProgress = `Syncing… ${syncedLocks}/${totalLocks} locks done (${Math.round(elapsed / 1000)}s)`;
-      this.requestUpdate();
+      const totalLocks = Object.keys(this._status).length;
+      this._pushProgress = "Syncing\u2026 " + syncedLocks + "/" + totalLocks + " locks done (" + Math.round(elapsed / 1000) + "s)";
+      this._scheduleRender();
     }, 2000);
   }
 
@@ -1069,48 +500,45 @@ class SlotSentryPanel extends LitElement {
 
   _allLocksSynced() {
     const entries = Object.values(this._status);
-    if (entries.length === 0) return false;
-    return entries.every(s => s.state === "synced");
+    return entries.length > 0 && entries.every(s => s.state === "synced");
   }
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Reveal toggles
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   _toggleReveal(key) {
     this._revealMap = { ...this._revealMap, [key]: !this._revealMap[key] };
-    this.requestUpdate();
+    this._scheduleRender();
   }
 
-  _isRevealed(key) { return !!this._revealMap[key]; }
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Toast helpers
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
-  _toast(message, type = "info") {
+  _toast(message, type) {
     const id = Date.now() + Math.random();
-    this._toasts = [...this._toasts, { id, message, type }];
-    this.requestUpdate();
+    this._toasts = [...this._toasts, { id, message, type: type || "info" }];
+    this._scheduleRender();
     setTimeout(() => {
       this._toasts = this._toasts.filter(t => t.id !== id);
-      this.requestUpdate();
+      this._scheduleRender();
     }, 4000);
   }
 
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Display helpers
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   _lockDisplayName(entityId) {
-    if (this.hass && this.hass.states && this.hass.states[entityId]) {
-      return this.hass.states[entityId].attributes.friendly_name || entityId;
+    if (this._hass && this._hass.states && this._hass.states[entityId]) {
+      return this._hass.states[entityId].attributes.friendly_name || entityId;
     }
     return entityId;
   }
 
   _overallStatusBadge() {
-    if (this._pushing) return { label: "Syncing…", cls: "pushing" };
+    if (this._pushing) return { label: "Syncing\u2026", cls: "pushing" };
     const entries = Object.values(this._status);
     if (!entries.length) return { label: "No Locks", cls: "" };
     if (entries.every(s => s.state === "synced")) return { label: "All Synced", cls: "synced" };
@@ -1122,335 +550,614 @@ class SlotSentryPanel extends LitElement {
     return !slot.label && !slot.long_code && !slot.short_code;
   }
 
-  _isSlotDirty(slotNumber) {
+  _isSlotDirtyOnLock(slotNumber) {
     return Object.values(this._status).some(
       s => Array.isArray(s.dirty_slots) && s.dirty_slots.includes(slotNumber)
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Render
-  // -------------------------------------------------------------------------
+  _getSlotSyncStatus(slotNumber) {
+    const entries = Object.values(this._status);
+    if (!entries.length) return { cls: "", tip: "No status" };
+    const dirty = this._isSlotDirtyOnLock(slotNumber);
+    if (dirty) return { cls: "sync-dirty", tip: "Out of sync — needs push" };
+    return { cls: "sync-ok", tip: "Synced" };
+  }
 
-  render() {
+  _buildErrorSummary() {
+    const lines = [];
+    for (const [lockEntity, info] of Object.entries(this._status)) {
+      if (info.failed_count > 0 || info.uncertain_count > 0) {
+        const name = this._lockDisplayName(lockEntity);
+        const parts = [];
+        if (info.failed_count) parts.push(info.failed_count + " failed");
+        if (info.uncertain_count) parts.push(info.uncertain_count + " uncertain");
+        if (info.dirty_slots && info.dirty_slots.length) {
+          parts.push("slots: " + info.dirty_slots.slice(0, 10).join(", "));
+        }
+        lines.push(name + ": " + parts.join(", "));
+      }
+    }
+    return lines.length ? lines.join("\n") : "No errors found.";
+  }
+
+  // ---------------------------------------------------------------------------
+  // SVG icons
+  // ---------------------------------------------------------------------------
+
+  _iconEyeSVG() {
+    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>';
+  }
+
+  _iconEyeOffSVG() {
+    return '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>';
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
+  _render() {
+    const root = this.shadowRoot;
+
     if (this._loading) {
-      return html`
-        ${this._renderToasts()}
-        <div class="loading-container">
-          <div class="spinner"></div>
-          <span>Loading SlotSentry…</span>
-        </div>
-      `;
+      root.innerHTML = this._styles() +
+        '<div class="loading-container"><div class="spinner"></div><span>Loading SlotSentry\u2026</span></div>' +
+        this._renderToastsHTML();
+      return;
     }
 
     if (this._error) {
-      return html`
-        ${this._renderToasts()}
-        <div class="error-container">
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
-          </svg>
-          <span>${this._error}</span>
-          <button class="btn btn-save" @click="${() => this._init()}">Retry</button>
-        </div>
-      `;
+      root.innerHTML = this._styles() +
+        '<div class="error-container">' +
+          '<svg width="40" height="40" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>' +
+          '<span>' + this._esc(this._error) + '</span>' +
+          '<button class="btn btn-save" data-action="retry">Retry</button>' +
+        '</div>' + this._renderToastsHTML();
+      return;
     }
 
     const badge = this._overallStatusBadge();
+    const lockNames = this._lockNames().join(" \u2022 ");
+    const version = "v2026.4.0a4";
+    const modeName = this._isDual ? "Dual" : "Single";
 
-    return html`
-      ${this._renderToasts()}
+    // Error badge: only show if there are actual errors; make it clickable
+    let badgeHTML = "";
+    if (badge.cls === "error") {
+      badgeHTML = `<button class="status-badge ${this._esc(badge.cls)}" data-action="show-errors" title="Click for details">${this._esc(badge.label)}</button>`;
+    } else if (badge.label) {
+      badgeHTML = `<span class="status-badge ${this._esc(badge.cls)}">${this._esc(badge.label)}</span>`;
+    }
 
+    root.innerHTML = this._styles() + `
       <div class="header">
-        <h1>
-          <svg class="header-icon" viewBox="0 0 24 24">
-            <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
-          </svg>
-          SlotSentry
-        </h1>
+        <div class="header-left">
+          <h1>
+            <svg class="header-icon" viewBox="0 0 24 24">
+              <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
+            </svg>
+            SlotSentry \u2014 Slot Manager
+            <span class="version">${this._esc(version)}</span>
+          </h1>
+          <div class="header-info">
+            <span class="header-detail">Locks: ${this._esc(lockNames)}</span>
+            <span class="header-detail">Mode: ${this._esc(modeName)} &nbsp; Code lengths: ${this._esc(this._modeSummary())}</span>
+          </div>
+        </div>
         <div class="header-actions">
-          <span class="status-badge ${badge.cls}">${badge.label}</span>
-          <button
-            class="btn btn-primary"
-            ?disabled="${this._pushing}"
-            @click="${() => this._pushAll()}"
-          >
+          ${badgeHTML}
+          <button class="btn btn-primary" data-action="push-all" ${this._pushing || this._savingAll ? "disabled" : ""}>
             ${this._pushing
-              ? html`<div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Pushing…`
-              : html`
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
-                </svg>
-                Push All
-              `}
+              ? '<div class="spinner-sm"></div> Pushing\u2026'
+              : '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> Push Changes'}
           </button>
         </div>
       </div>
 
       <div class="content">
-        ${this._pushing ? html`
-          <div class="push-progress-bar">
-            <div class="spinner"></div>
-            <span>${this._pushProgress}</span>
-          </div>
-        ` : ""}
+        ${this._pushing || this._savingAll ? '<div class="push-progress-bar"><div class="spinner-sm"></div><span>' + this._esc(this._pushProgress) + '</span></div>' : ''}
 
         <p class="section-title">Slots (${this._slots.length})</p>
-        ${this._renderSlotTable()}
+        ${this._renderSlotTableHTML()}
+
+        <div class="bottom-bar">
+          <label class="update-all-label">
+            <input type="checkbox" data-action="update-all" ${this._updateAll ? "checked" : ""} />
+            Update All Slots
+          </label>
+          <div class="bottom-actions">
+            ${this._dirty
+              ? '<button class="btn btn-discard" data-action="discard">Discard</button><button class="btn btn-save" data-action="save-all">Save</button>'
+              : ''}
+          </div>
+        </div>
 
         <p class="section-title" style="margin-top:28px;">Lock Status</p>
-        ${this._renderStatusSection()}
+        ${this._renderStatusSectionHTML()}
       </div>
-    `;
+    ` + this._renderToastsHTML();
+
+    this._restoreInputValues();
   }
 
-  _renderSlotTable() {
+  _renderSlotTableHTML() {
     if (!this._slots.length) {
-      return html`
-        <div class="slot-card" style="padding:20px;color:var(--secondary-text-color,#727272);font-style:italic;">
-          No slots configured. Check your SlotSentry integration settings.
-        </div>
-      `;
+      return '<div class="slot-card" style="padding:20px;color:var(--secondary-text-color,#727272);font-style:italic;">No slots available. The integration may need to be reconfigured.</div>';
     }
 
-    return html`
+    const dual = this._isDual;
+    const longLen = (this._config && this._config.code_length_long) || "?";
+    const shortLen = (this._config && this._config.code_length_short) || "?";
+    const singleLen = (this._config && (this._config.code_length_single || this._config.code_length_long)) || "?";
+    let headerCols = '<th class="col-num">#</th><th class="col-on">On</th><th>Label</th>';
+    if (dual) {
+      headerCols += `<th>Long Code (${this._esc(longLen)}-digit)</th><th>Short Code (${this._esc(shortLen)}-digit)</th>`;
+    } else {
+      headerCols += `<th>Code (${this._esc(singleLen)}-digit)</th>`;
+    }
+    headerCols += '<th class="col-status">Status</th><th>Actions</th>';
+
+    let rows = "";
+    for (const slot of this._slots) {
+      rows += this._renderSlotRowHTML(slot);
+    }
+
+    return `
       <div class="slot-card">
         <div class="slot-table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Label</th>
-                <th>Long Code</th>
-                <th>Short Code</th>
-                <th>Enabled</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${this._slots.map(slot => this._renderSlotRow(slot))}
-            </tbody>
+            <thead><tr>${headerCols}</tr></thead>
+            <tbody>${rows}</tbody>
           </table>
         </div>
-      </div>
-    `;
+      </div>`;
   }
 
-  _renderSlotRow(slot) {
-    const n    = slot.slot_number;
+  _renderSlotRowHTML(slot) {
+    const n = slot.slot_number;
     const vals = this._editValues[n] || {
       label: slot.label || "", long_code: slot.long_code || "",
-      short_code: slot.short_code || "", enabled: slot.enabled ?? true,
+      short_code: slot.short_code || "", enabled: slot.enabled ?? false,
     };
-    const saving   = !!this._savingSlots[n];
+    const saving = !!this._savingSlots[n];
     const deleting = !!this._deletingSlots[n];
-    const dirty    = this._isSlotDirty(n);
-    const isEmpty  = this._isSlotEmpty(slot);
+    const rowDirty = this._isRowDirty(slot);
+    const lockDirty = this._isSlotDirtyOnLock(n);
+    const isEmpty = this._isSlotEmpty(slot);
+    const disabled = saving || deleting ? "disabled" : "";
+    const dual = this._isDual;
 
-    const longKey  = `long-${n}`;
-    const shortKey = `short-${n}`;
+    let classes = "";
+    if (rowDirty) classes += " slot-edited";
+    if (lockDirty) classes += " slot-dirty";
+    if (isEmpty) classes += " empty-slot";
+    if (!vals.enabled) classes += " slot-disabled";
 
-    return html`
-      <tr class="${dirty ? "slot-dirty" : ""} ${isEmpty ? "empty-slot" : ""}">
-        <td class="slot-num">${n}</td>
+    const longLen = (this._config && this._config.code_length_long) || "";
+    const shortLen = (this._config && this._config.code_length_short) || "";
+    const singleLen = (this._config && (this._config.code_length_single || this._config.code_length_long)) || "";
 
-        <td>
-          <input
-            class="slot-input"
-            type="text"
-            placeholder="Label"
-            .value="${vals.label}"
-            @input="${e => this._onFieldInput(n, "label", e.target.value)}"
-          />
-        </td>
-
-        <td>
-          <div class="code-cell">
-            <input
-              class="slot-input"
-              type="${this._isRevealed(longKey) ? "text" : "password"}"
-              placeholder="Long code"
-              autocomplete="off"
-              .value="${vals.long_code}"
-              @input="${e => this._onFieldInput(n, "long_code", e.target.value)}"
-            />
-            <button
-              class="reveal-btn"
-              title="${this._isRevealed(longKey) ? "Hide" : "Reveal"}"
-              @click="${() => this._toggleReveal(longKey)}"
-            >
-              ${this._isRevealed(longKey) ? this._iconEyeOff() : this._iconEye()}
-            </button>
-          </div>
-        </td>
-
+    let codeColumns = "";
+    if (dual) {
+      const longRevealed = !!this._revealMap["long-" + n];
+      const shortRevealed = !!this._revealMap["short-" + n];
+      codeColumns = `
         <td>
           <div class="code-cell">
-            <input
-              class="slot-input"
-              type="${this._isRevealed(shortKey) ? "text" : "password"}"
-              placeholder="Short code"
-              autocomplete="off"
-              .value="${vals.short_code}"
-              @input="${e => this._onFieldInput(n, "short_code", e.target.value)}"
-            />
-            <button
-              class="reveal-btn"
-              title="${this._isRevealed(shortKey) ? "Hide" : "Reveal"}"
-              @click="${() => this._toggleReveal(shortKey)}"
-            >
-              ${this._isRevealed(shortKey) ? this._iconEyeOff() : this._iconEye()}
-            </button>
+            <input class="slot-input" type="${longRevealed ? "text" : "password"}"
+              placeholder="${longLen ? longLen + " digits" : "Long code"}" autocomplete="off"
+              data-slot="${n}" data-field="long_code" />
+            <button class="reveal-btn" data-action="reveal" data-key="long-${n}"
+              title="${longRevealed ? "Hide" : "Reveal"}">${longRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
           </div>
         </td>
-
-        <td style="text-align:center;">
-          <input
-            class="enabled-toggle"
-            type="checkbox"
-            .checked="${!!vals.enabled}"
-            @change="${e => this._onEnabledChange(n, e.target.checked)}"
-          />
-        </td>
-
         <td>
-          <div class="actions-cell">
-            <button
-              class="btn btn-save"
-              ?disabled="${saving || deleting}"
-              @click="${() => this._saveSlot(n)}"
-            >
-              ${saving
-                ? html`<div class="spinner" style="width:12px;height:12px;border-width:2px;"></div>`
-                : "Save"}
-            </button>
-            <button
-              class="btn btn-delete"
-              ?disabled="${saving || deleting}"
-              @click="${() => this._deleteSlot(n)}"
-            >
-              ${deleting
-                ? html`<div class="spinner" style="width:12px;height:12px;border-width:2px;"></div>`
-                : "Clear"}
-            </button>
+          <div class="code-cell">
+            <input class="slot-input" type="${shortRevealed ? "text" : "password"}"
+              placeholder="${shortLen ? shortLen + " digits" : "Short code"}" autocomplete="off"
+              data-slot="${n}" data-field="short_code" />
+            <button class="reveal-btn" data-action="reveal" data-key="short-${n}"
+              title="${shortRevealed ? "Hide" : "Reveal"}">${shortRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
           </div>
-        </td>
-      </tr>
-    `;
-  }
-
-  _renderStatusSection() {
-    const entries = Object.entries(this._status);
-
-    if (!entries.length) {
-      return html`<p class="no-locks">No lock status available. Push to populate.</p>`;
+        </td>`;
+    } else {
+      const revealed = !!this._revealMap["code-" + n];
+      codeColumns = `
+        <td>
+          <div class="code-cell">
+            <input class="slot-input" type="${revealed ? "text" : "password"}"
+              placeholder="${singleLen ? singleLen + " digits" : "Code"}" autocomplete="off"
+              data-slot="${n}" data-field="long_code" />
+            <button class="reveal-btn" data-action="reveal" data-key="code-${n}"
+              title="${revealed ? "Hide" : "Reveal"}">${revealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
+          </div>
+        </td>`;
     }
 
-    return html`
-      <div class="status-grid">
-        ${entries.map(([lockEntity, info]) => this._renderLockCard(lockEntity, info))}
-      </div>
-    `;
+    // Slot sync status indicator
+    const syncStatus = this._getSlotSyncStatus(n);
+
+    return `
+      <tr class="${classes.trim()}">
+        <td class="slot-num">${n}</td>
+        <td class="col-on">
+          <input class="enabled-toggle" type="checkbox"
+            data-slot="${n}" data-field="enabled" ${vals.enabled ? "checked" : ""} />
+        </td>
+        <td>
+          <input class="slot-input" type="text" placeholder="Label"
+            data-slot="${n}" data-field="label" />
+        </td>
+        ${codeColumns}
+        <td class="col-status">
+          <span class="slot-sync-dot ${this._esc(syncStatus.cls)}" title="${this._esc(syncStatus.tip)}"></span>
+        </td>
+        <td>
+          <div class="actions-cell">
+            <button class="btn btn-save btn-sm" data-action="save" data-slot="${n}" ${disabled}>
+              ${saving ? '<div class="spinner-xs"></div>' : "Save"}
+            </button>
+            <button class="btn btn-delete btn-sm" data-action="delete" data-slot="${n}" ${disabled}>
+              ${deleting ? '<div class="spinner-xs"></div>' : "Clear"}
+            </button>
+          </div>
+        </td>
+      </tr>`;
   }
 
-  _renderLockCard(lockEntity, info) {
+  _renderStatusSectionHTML() {
+    const entries = Object.entries(this._status);
+    if (!entries.length) {
+      return '<p class="no-locks">No lock status available. Push codes to populate.</p>';
+    }
+    let cards = "";
+    for (const [lockEntity, info] of entries) {
+      cards += this._renderLockCardHTML(lockEntity, info);
+    }
+    return '<div class="status-grid">' + cards + '</div>';
+  }
+
+  _renderLockCardHTML(lockEntity, info) {
     const name = this._lockDisplayName(lockEntity);
     const state = info.state || "uncertain";
     const pushing = !!this._pushingLocks[lockEntity];
 
-    return html`
-      <div class="lock-card ${state}">
+    let dirtyCountHTML = "";
+    let dirtyListHTML = "";
+    if (info.dirty_slots && info.dirty_slots.length) {
+      dirtyCountHTML = '<span class="lock-count-item"><span class="dot dot-dirty"></span>' + info.dirty_slots.length + ' dirty</span>';
+      const shown = info.dirty_slots.slice(0, 10).join(", ");
+      const extra = info.dirty_slots.length > 10 ? (" +" + (info.dirty_slots.length - 10) + " more") : "";
+      dirtyListHTML = '<div class="dirty-slots">Pending: ' + this._esc(shown + extra) + '</div>';
+    }
+
+    return `
+      <div class="lock-card ${this._esc(state)}">
         <div class="lock-name">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0;opacity:0.7;">
             <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
           </svg>
-          <span title="${lockEntity}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${name}</span>
-          <span class="lock-state-pill ${state}">${state.replace("_", " ")}</span>
+          <span title="${this._esc(lockEntity)}" class="lock-name-text">${this._esc(name)}</span>
+          <span class="lock-state-pill ${this._esc(state)}">${this._esc(state.replace(/_/g, " "))}</span>
         </div>
-
         <div class="lock-counts">
-          <span class="lock-count-item">
-            <span class="dot dot-synced"></span>
-            ${info.synced_count ?? 0} synced
-          </span>
-          <span class="lock-count-item">
-            <span class="dot dot-failed"></span>
-            ${info.failed_count ?? 0} failed
-          </span>
-          <span class="lock-count-item">
-            <span class="dot dot-uncertain"></span>
-            ${info.uncertain_count ?? 0} uncertain
-          </span>
-          ${info.dirty_slots && info.dirty_slots.length ? html`
-            <span class="lock-count-item">
-              <span class="dot dot-dirty"></span>
-              ${info.dirty_slots.length} dirty
-            </span>
-          ` : ""}
+          <span class="lock-count-item"><span class="dot dot-synced"></span>${info.synced_count ?? 0} synced</span>
+          <span class="lock-count-item"><span class="dot dot-failed"></span>${info.failed_count ?? 0} failed</span>
+          <span class="lock-count-item"><span class="dot dot-uncertain"></span>${info.uncertain_count ?? 0} uncertain</span>
+          ${dirtyCountHTML}
         </div>
-
-        ${info.dirty_slots && info.dirty_slots.length ? html`
-          <div class="dirty-slots">
-            Pending slots: ${info.dirty_slots.slice(0, 10).join(", ")}${info.dirty_slots.length > 10 ? ` +${info.dirty_slots.length - 10} more` : ""}
-          </div>
-        ` : ""}
-
+        ${dirtyListHTML}
         <div class="lock-actions">
-          <button
-            class="btn btn-push-lock"
-            ?disabled="${pushing || this._pushing}"
-            @click="${() => this._pushLock(lockEntity)}"
-          >
+          <button class="btn btn-push-lock" data-action="push-lock" data-lock="${this._esc(lockEntity)}"
+            ${pushing || this._pushing ? "disabled" : ""}>
             ${pushing
-              ? html`<div class="spinner" style="width:12px;height:12px;border-width:2px;"></div> Pushing…`
-              : html`
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
-                </svg>
-                Push Lock
-              `}
+              ? '<div class="spinner-xs"></div> Pushing\u2026'
+              : '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> Push Lock'}
           </button>
         </div>
-      </div>
-    `;
+      </div>`;
   }
 
-  _renderToasts() {
+  _renderToastsHTML() {
     if (!this._toasts.length) return "";
-    return html`
-      <div class="toast-container">
-        ${this._toasts.map(t => html`
-          <div class="toast ${t.type}">${t.message}</div>
-        `)}
-      </div>
-    `;
+    let toasts = "";
+    for (const t of this._toasts) {
+      toasts += '<div class="toast ' + this._esc(t.type) + '">' + this._esc(t.message) + '</div>';
+    }
+    return '<div class="toast-container">' + toasts + '</div>';
   }
 
-  // -------------------------------------------------------------------------
-  // SVG icons (inline)
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Event binding via delegation
+  // ---------------------------------------------------------------------------
 
-  _iconEye() {
-    return html`
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/>
-      </svg>
-    `;
+  _bindEvents() {
+    const root = this.shadowRoot;
+
+    root.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === "retry") { this._initStarted = false; this._init(); }
+      else if (action === "push-all") { this._pushAll(); }
+      else if (action === "save") { this._saveSlot(parseInt(btn.dataset.slot, 10)); }
+      else if (action === "delete") { this._deleteSlot(parseInt(btn.dataset.slot, 10)); }
+      else if (action === "reveal") { this._toggleReveal(btn.dataset.key); }
+      else if (action === "push-lock") { this._pushLock(btn.dataset.lock); }
+      else if (action === "save-all") { this._saveAll(); }
+      else if (action === "discard") { this._discardAll(); }
+      else if (action === "show-errors") { window.alert(this._buildErrorSummary()); }
+    });
+
+    root.addEventListener("input", (e) => {
+      const inp = e.target;
+      if (inp.dataset.slot && inp.dataset.field) {
+        this._onFieldInput(parseInt(inp.dataset.slot, 10), inp.dataset.field, inp.value);
+      }
+    });
+
+    root.addEventListener("change", (e) => {
+      const inp = e.target;
+      if (inp.dataset.slot && inp.dataset.field === "enabled") {
+        this._onEnabledChange(parseInt(inp.dataset.slot, 10), inp.checked);
+      }
+      if (inp.dataset.action === "update-all") {
+        this._updateAll = inp.checked;
+        this._checkDirty();
+        this._scheduleRender();
+      }
+    });
   }
 
-  _iconEyeOff() {
-    return html`
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/>
-      </svg>
-    `;
+  _restoreInputValues() {
+    const root = this.shadowRoot;
+    const inputs = root.querySelectorAll("input[data-slot][data-field]");
+    for (const inp of inputs) {
+      const n = parseInt(inp.dataset.slot, 10);
+      const field = inp.dataset.field;
+      const vals = this._editValues[n];
+      if (!vals) continue;
+      if (field === "enabled") {
+        inp.checked = !!vals.enabled;
+      } else if (vals[field] !== undefined) {
+        inp.value = vals[field];
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Styles
+  // ---------------------------------------------------------------------------
+
+  _styles() {
+    return `<style>
+      :host {
+        display: block;
+        font-family: var(--paper-font-body1_-_font-family, "Roboto", sans-serif);
+        color: var(--primary-text-color, #212121);
+        background: var(--primary-background-color, #fafafa);
+        min-height: 100vh;
+        --ss-accent: var(--primary-color, #03a9f4);
+        --ss-accent-text: #fff;
+        --ss-success: #4caf50;
+        --ss-error: #f44336;
+        --ss-warning: #ff9800;
+        --ss-uncertain: #9e9e9e;
+        --ss-dirty: #ff9800;
+        --ss-card-bg: var(--card-background-color, #fff);
+        --ss-border: var(--divider-color, #e0e0e0);
+        --ss-radius: 12px;
+      }
+
+      /* Header */
+      .header {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        padding: 16px 24px;
+        background: var(--ss-card-bg);
+        border-bottom: 1px solid var(--ss-border);
+        position: sticky; top: 0; z-index: 10;
+      }
+      .header-left { flex: 1; min-width: 0; }
+      .header h1 {
+        margin: 0; font-size: 20px; font-weight: 500;
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      }
+      .header-icon { width: 28px; height: 28px; fill: var(--ss-accent); flex-shrink: 0; }
+      .version { font-size: 11px; color: var(--secondary-text-color); font-weight: 400; }
+      .header-info {
+        display: flex; flex-wrap: wrap; gap: 6px 18px;
+        margin-top: 4px; font-size: 12px; color: var(--secondary-text-color);
+      }
+      .header-detail { white-space: nowrap; }
+      .header-actions {
+        display: flex; align-items: center; gap: 12px; flex-shrink: 0; margin-left: 16px; margin-top: 4px;
+      }
+
+      /* Status badge */
+      .status-badge {
+        display: inline-block; padding: 3px 10px;
+        border-radius: 12px; font-size: 12px; font-weight: 500;
+        background: var(--ss-border); color: var(--primary-text-color);
+      }
+      .status-badge.synced { background: var(--ss-success); color: #fff; }
+      .status-badge.error { background: var(--ss-error); color: #fff; cursor: pointer; }
+      button.status-badge { border: none; font-family: inherit; }
+      .status-badge.out_of_sync { background: var(--ss-warning); color: #fff; }
+      .status-badge.pushing { background: var(--ss-accent); color: #fff; }
+
+      /* Buttons */
+      .btn {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 6px 14px; border: none; border-radius: 8px;
+        font-size: 13px; font-weight: 500; cursor: pointer;
+        transition: opacity .15s;
+      }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .btn-sm { padding: 4px 10px; font-size: 12px; }
+      .btn-primary { background: var(--ss-accent); color: var(--ss-accent-text); }
+      .btn-save { background: var(--ss-success); color: #fff; }
+      .btn-delete { background: var(--ss-error); color: #fff; }
+      .btn-discard { background: var(--ss-uncertain); color: #fff; }
+      .btn-push-lock { background: var(--ss-accent); color: var(--ss-accent-text); font-size: 12px; padding: 4px 10px; }
+
+      /* Content */
+      .content { padding: 20px 24px 40px; max-width: 1200px; margin: 0 auto; }
+      .section-title {
+        font-size: 15px; font-weight: 500; margin: 0 0 10px 0;
+        color: var(--secondary-text-color, #727272);
+      }
+
+      /* Slot table card */
+      .slot-card {
+        background: var(--ss-card-bg);
+        border-radius: var(--ss-radius);
+        border: 1px solid var(--ss-border);
+        overflow: hidden;
+      }
+      .slot-table-wrap { overflow-x: auto; max-height: 70vh; overflow-y: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      thead { position: sticky; top: 0; z-index: 2; background: var(--ss-card-bg); }
+      th {
+        text-align: left; padding: 10px 8px;
+        font-weight: 600; font-size: 12px; text-transform: uppercase;
+        letter-spacing: 0.5px; color: var(--secondary-text-color, #727272);
+        border-bottom: 2px solid var(--ss-border);
+      }
+      td { padding: 6px 8px; border-bottom: 1px solid var(--ss-border); vertical-align: middle; }
+      .col-num { width: 36px; text-align: center; }
+      .col-on { width: 40px; text-align: center; }
+      .slot-num { font-weight: 600; color: var(--secondary-text-color); text-align: center; }
+
+      tr.slot-edited { background: rgba(255, 235, 59, 0.12); }
+      tr.slot-dirty { background: rgba(255, 152, 0, 0.08); }
+      tr.empty-slot td { opacity: 0.6; }
+      tr.slot-disabled td:not(.slot-num):not(.col-on) { opacity: 0.4; }
+      tr:hover { background: rgba(0,0,0,0.02); }
+
+      /* Inputs */
+      .slot-input {
+        width: 100%; min-width: 60px; padding: 5px 8px;
+        border: 1px solid var(--ss-border); border-radius: 6px;
+        font-size: 13px; background: var(--primary-background-color, #fafafa);
+        color: var(--primary-text-color); box-sizing: border-box;
+      }
+      .slot-input:focus { outline: none; border-color: var(--ss-accent); }
+
+      .code-cell { display: flex; align-items: center; gap: 4px; }
+      .reveal-btn {
+        background: none; border: none; cursor: pointer; padding: 4px;
+        color: var(--secondary-text-color); display: flex; align-items: center;
+        border-radius: 4px; flex-shrink: 0;
+      }
+      .reveal-btn:hover { background: rgba(0,0,0,0.05); }
+
+      .enabled-toggle { width: 18px; height: 18px; cursor: pointer; accent-color: var(--ss-accent); }
+      .col-status { width: 44px; text-align: center; }
+      .slot-sync-dot {
+        display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+        background: var(--ss-uncertain);
+      }
+      .slot-sync-dot.sync-ok { background: var(--ss-success); }
+      .slot-sync-dot.sync-dirty { background: var(--ss-warning); }
+      .actions-cell { display: flex; gap: 6px; white-space: nowrap; }
+
+      /* Bottom bar */
+      .bottom-bar {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 12px 0; margin-top: 8px;
+      }
+      .update-all-label {
+        display: flex; align-items: center; gap: 8px;
+        font-size: 13px; cursor: pointer; color: var(--primary-text-color);
+      }
+      .update-all-label input { width: 16px; height: 16px; accent-color: var(--ss-accent); }
+      .bottom-actions { display: flex; gap: 8px; }
+
+      /* Lock status */
+      .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+      .lock-card {
+        background: var(--ss-card-bg); border-radius: var(--ss-radius);
+        border: 1px solid var(--ss-border); padding: 14px;
+        border-left: 4px solid var(--ss-uncertain);
+      }
+      .lock-card.synced { border-left-color: var(--ss-success); }
+      .lock-card.out_of_sync { border-left-color: var(--ss-warning); }
+      .lock-card.error, .lock-card.failed { border-left-color: var(--ss-error); }
+
+      .lock-name { display: flex; align-items: center; gap: 8px; font-weight: 500; font-size: 14px; margin-bottom: 8px; }
+      .lock-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .lock-state-pill {
+        font-size: 10px; font-weight: 600; text-transform: uppercase;
+        padding: 2px 8px; border-radius: 10px; letter-spacing: 0.3px;
+        background: var(--ss-uncertain); color: #fff; flex-shrink: 0;
+      }
+      .lock-state-pill.synced { background: var(--ss-success); }
+      .lock-state-pill.out_of_sync { background: var(--ss-warning); }
+      .lock-state-pill.error, .lock-state-pill.failed { background: var(--ss-error); }
+
+      .lock-counts { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--secondary-text-color); margin-bottom: 8px; }
+      .lock-count-item { display: flex; align-items: center; gap: 4px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+      .dot-synced { background: var(--ss-success); }
+      .dot-failed { background: var(--ss-error); }
+      .dot-uncertain { background: var(--ss-uncertain); }
+      .dot-dirty { background: var(--ss-dirty); }
+
+      .dirty-slots { font-size: 11px; color: var(--secondary-text-color); margin-bottom: 8px; font-style: italic; }
+      .lock-actions { display: flex; justify-content: flex-end; }
+
+      /* Loading / Error */
+      .loading-container, .error-container {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 14px; padding: 80px 20px;
+        color: var(--secondary-text-color);
+      }
+
+      /* Push progress */
+      .push-progress-bar {
+        display: flex; align-items: center; gap: 10px;
+        padding: 10px 16px; margin-bottom: 16px;
+        background: rgba(3, 169, 244, 0.08);
+        border-radius: 8px; font-size: 13px; color: var(--ss-accent);
+      }
+
+      /* Spinners */
+      .spinner { width: 24px; height: 24px; border: 3px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+      .spinner-sm { width: 14px; height: 14px; border: 2px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
+      .spinner-xs { width: 12px; height: 12px; border: 2px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      /* Toasts */
+      .toast-container {
+        position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+        z-index: 9999; display: flex; flex-direction: column; gap: 8px;
+        align-items: center; pointer-events: none;
+      }
+      .toast {
+        padding: 10px 20px; border-radius: 8px; font-size: 13px;
+        color: #fff; pointer-events: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        animation: toastIn 0.3s ease;
+      }
+      .toast.success { background: var(--ss-success); }
+      .toast.error { background: var(--ss-error); }
+      .toast.info { background: var(--ss-accent); }
+      @keyframes toastIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+      .no-locks { color: var(--secondary-text-color); font-style: italic; }
+
+      @media (max-width: 600px) {
+        .header { padding: 12px 14px; flex-direction: column; gap: 8px; }
+        .header-actions { margin-left: 0; }
+        .header h1 { font-size: 17px; }
+        .content { padding: 12px 8px 32px; }
+        .status-grid { grid-template-columns: 1fr; }
+      }
+    </style>`;
   }
 }
 
-// ---------------------------------------------------------------------------
 // Register the custom element
-// ---------------------------------------------------------------------------
-
 if (!customElements.get("slotsentry-panel")) {
   customElements.define("slotsentry-panel", SlotSentryPanel);
 }

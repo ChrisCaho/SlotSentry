@@ -8,30 +8,37 @@
       },
       "locks": {
         "title": "Select Locks & Code Length Mode",
-        "description": "{discovery_notice}\n\nSelect the locks you want SlotSentry to manage. Slot count will be the smallest capacity among selected locks.\n\nIf your locks use different PIN lengths, turn on the toggle below to set separate short and long lengths on the next screen.",
+        "description": "{discovery_notice}\n\nSelect the locks you want SlotSentry to manage. Slot count will be the smallest capacity among selected locks.\n\nIf your locks use different PIN lengths, turn on the toggle below to set separate short and long lengths on the next screen.\n\n* Required field",
         "data": {
           "lock_entities": "Locks to manage",
-          "code_length_mode": "Use two code lengths (Short + Long)"
+          "code_length_mode": "Enable dual code lengths (Short + Long)"
+        }
+      },
+      "slot_count": {
+        "title": "Slot Count",
+        "description": "SlotSentry could not auto-detect the number of code slots on your locks. Please enter the slot count manually. Check your lock documentation if unsure — most residential Z-Wave locks have 19 or 30 slots.\n\n* Required field",
+        "data": {
+          "slot_count": "Number of code slots"
         }
       },
       "code_length_single": {
         "title": "Code Length",
-        "description": "Set the PIN code length that all locks will use.",
+        "description": "Set the PIN code length that all locks will use.\n\n* Required field",
         "data": {
-          "code_length_single": "Code length"
+          "code_length_single": "Code length (digits)"
         }
       },
       "code_length_dual": {
         "title": "Short & Long Code Lengths",
-        "description": "Set the short and long PIN code lengths. Short must be less than long.",
+        "description": "Set the short and long PIN code lengths. Short must be less than long.\n\n* Required field",
         "data": {
-          "code_length_short": "Short code length",
-          "code_length_long": "Long code length"
+          "code_length_short": "Short code length (digits)",
+          "code_length_long": "Long code length (digits)"
         }
       },
       "lockout": {
         "title": "Keypad Lockout — Optional",
-        "description": "SlotSentry can disable lock keypads when a trigger entity reaches one or more target states (e.g. when your alarm is armed).\n\nSelect the trigger entity, then choose which states activate the lockout. You can select multiple states or type custom values.",
+        "description": "SlotSentry can disable lock keypads when a trigger entity reaches one or more target states (e.g. when your alarm is armed).\n\nSelect the trigger entity, then choose which states activate the lockout. You can select multiple states or type custom values.\n\nIf lockout is enabled, a trigger entity and at least one target state are required.",
         "data": {
           "lockout_enabled": "Enable keypad lockout",
           "lockout_trigger_entity": "Lockout trigger entity",
@@ -41,14 +48,16 @@
       },
       "secure_mode": {
         "title": "Secure Mode — Optional",
-        "description": "When Secure Mode is enabled, all stored PIN codes are encrypted at rest. You will be prompted to set a password the first time you open the SlotSentry panel.\n\nSecure Mode can also be enabled or disabled later via Reconfigure.",
+        "description": "When Secure Mode is enabled, all stored PIN codes are encrypted at rest using a password you choose. You will need this password every time you open the SlotSentry panel.\n\nIf you enable Secure Mode, enter and confirm your password below. Secure Mode can also be changed later via Reconfigure.",
         "data": {
-          "secure_mode": "Enable Secure Mode"
+          "secure_mode": "Enable Secure Mode",
+          "secure_password": "Password (8-16 characters)",
+          "secure_password_confirm": "Confirm password"
         }
       },
       "confirm": {
         "title": "Review & Confirm",
-        "description": "Locks ({lock_count}): {lock_list}\nSlots: {slot_count}\nCode Length: {code_length_mode} — {code_lengths}\nKeypad Lockout: {lockout_summary}\nSecure Mode: {secure_mode}\n\nClick Next to assign an area and finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
+        "description": "Locks ({lock_count}): {lock_list}\nSlots: {slot_count}\nCode Length: {code_length_mode} — {code_lengths}\nKeypad Lockout: {lockout_summary}\nSecure Mode: {secure_mode}\n\nClick Submit to finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
       }
     },
     "abort": {
@@ -59,9 +68,15 @@
       "no_locks_selected": "At least one lock must be selected.",
       "short_gte_long": "Short code length must be less than long code length.",
       "no_lockout_locks": "At least one lock must participate in lockout.",
+      "lockout_incomplete": "Lockout configuration is incomplete. Either enable the toggle and fill all fields, or disable the toggle and clear the trigger/state selections.",
       "no_lockout_states": "Select at least one target state when lockout is enabled.",
       "no_lockout_trigger": "Select a trigger entity when lockout is enabled.",
-      "duplicate_label": "Slot labels must be unique."
+      "duplicate_label": "Slot labels must be unique.",
+      "password_without_secure_mode": "Password fields must be empty when Secure Mode is off. Clear them or enable Secure Mode.",
+      "password_required": "Password is required when Secure Mode is enabled.",
+      "password_mismatch": "Passwords do not match.",
+      "password_too_short": "Password must be at least 8 characters.",
+      "password_too_long": "Password must be at most 16 characters."
     }
   },
   "entity": {

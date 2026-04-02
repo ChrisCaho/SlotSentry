@@ -9,7 +9,7 @@ Revision: 1.1
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a3"
+VERSION = "2026.4.0a4"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 1
@@ -54,6 +54,7 @@ WS_DELETE_SLOT = "slotsentry/delete_slot"
 WS_PUSH_ALL = "slotsentry/push_all"
 WS_PUSH_LOCK = "slotsentry/push_lock"
 WS_GET_STATUS = "slotsentry/get_status"
+WS_GET_CONFIG = "slotsentry/get_config"
 
 # Commit state machine states
 STATE_IDLE = "idle"

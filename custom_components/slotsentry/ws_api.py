@@ -16,7 +16,7 @@ Command overview:
   slotsentry/push_lock   — Push all dirty slots to one specific lock.
   slotsentry/get_status  — Return per-lock sync summary.
 
-Revision: 1.0
+Revision: 1.1 — require_admin, get_config allow-list, slot_number bounds.
 """
 
 from __future__ import annotations
@@ -30,8 +30,20 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_CODE_LENGTH_LONG,
+    CONF_CODE_LENGTH_MODE,
+    CONF_CODE_LENGTH_SHORT,
+    CONF_CODE_LENGTH_SINGLE,
+    CONF_LOCK_ENTITIES,
+    CONF_LOCKOUT_ENABLED,
+    CONF_LOCKOUT_PARTICIPATING_LOCKS,
+    CONF_LOCKOUT_TARGET_STATES,
+    CONF_LOCKOUT_TRIGGER_ENTITY,
+    CONF_SECURE_MODE,
+    CONF_SLOT_COUNT,
     DOMAIN,
     WS_DELETE_SLOT,
+    WS_GET_CONFIG,
     WS_GET_SLOTS,
     WS_GET_STATUS,
     WS_PUSH_ALL,
@@ -119,6 +131,7 @@ def _slot_data_to_dict(slot: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_GET_SLOTS,
@@ -171,11 +184,12 @@ async def ws_get_slots(
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_SET_SLOT,
         vol.Required("entry_id"): str,
-        vol.Required("slot_number"): int,
+        vol.Required("slot_number"): vol.All(int, vol.Range(min=1)),
         vol.Required("label"): str,
         vol.Required("long_code"): str,
         vol.Required("short_code"): str,
@@ -242,11 +256,12 @@ async def ws_set_slot(
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_DELETE_SLOT,
         vol.Required("entry_id"): str,
-        vol.Required("slot_number"): int,
+        vol.Required("slot_number"): vol.All(int, vol.Range(min=1)),
     }
 )
 @websocket_api.async_response
@@ -290,6 +305,7 @@ async def ws_delete_slot(
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_PUSH_ALL,
@@ -336,6 +352,7 @@ async def ws_push_all(
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_PUSH_LOCK,
@@ -401,6 +418,7 @@ async def ws_push_lock(
 # ---------------------------------------------------------------------------
 
 
+@websocket_api.require_admin
 @websocket_api.websocket_command(
     {
         vol.Required("type"): WS_GET_STATUS,
@@ -446,6 +464,64 @@ async def ws_get_status(
 
 
 # ---------------------------------------------------------------------------
+# WS command: get_config
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_GET_CONFIG,
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_get_config(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return config entry data needed by the frontend panel.
+
+    WebSocket command: ``slotsentry/get_config``
+
+    Returns the config entry data dict (lock_entities, code_length_mode,
+    code lengths, slot_count, lockout settings, secure_mode) so the panel
+    can display configuration info without needing access to the raw
+    config_entries store.
+    """
+    entry_id: str = msg["entry_id"]
+    entry = hass.config_entries.async_get_entry(entry_id)
+
+    if entry is None or entry.domain != DOMAIN:
+        connection.send_error(
+            msg["id"],
+            "not_found",
+            f"Config entry '{entry_id}' not found or does not belong to {DOMAIN}",
+        )
+        return
+
+    # Allow-list: only return keys the panel needs.
+    _SAFE_CONFIG_KEYS = {
+        CONF_LOCK_ENTITIES,
+        CONF_CODE_LENGTH_MODE,
+        CONF_CODE_LENGTH_SINGLE,
+        CONF_CODE_LENGTH_SHORT,
+        CONF_CODE_LENGTH_LONG,
+        CONF_SLOT_COUNT,
+        CONF_SECURE_MODE,
+        CONF_LOCKOUT_ENABLED,
+        CONF_LOCKOUT_TRIGGER_ENTITY,
+        CONF_LOCKOUT_TARGET_STATES,
+        CONF_LOCKOUT_PARTICIPATING_LOCKS,
+    }
+    data = {k: v for k, v in entry.data.items() if k in _SAFE_CONFIG_KEYS}
+
+    connection.send_result(msg["id"], {"config": data})
+    _LOGGER.debug("ws_get_config: returned config for entry %s", entry_id)
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -461,6 +537,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     Args:
         hass: The Home Assistant instance.
     """
+    websocket_api.async_register_command(hass, ws_get_config)
     websocket_api.async_register_command(hass, ws_get_slots)
     websocket_api.async_register_command(hass, ws_set_slot)
     websocket_api.async_register_command(hass, ws_delete_slot)
@@ -470,9 +547,10 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
 
     _LOGGER.debug(
         "SlotSentry: registered %d WebSocket command(s): %s",
-        6,
+        7,
         ", ".join(
             [
+                WS_GET_CONFIG,
                 WS_GET_SLOTS,
                 WS_SET_SLOT,
                 WS_DELETE_SLOT,

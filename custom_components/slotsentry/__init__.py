@@ -22,7 +22,7 @@ from homeassistant.components.frontend import (
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_LOCK_ENTITIES, DOMAIN, PLATFORMS
+from .const import CONF_LOCK_ENTITIES, DOMAIN, PLATFORMS, VERSION
 from .lock_backend import ZWaveJSBackend
 from .slot_manager import SlotManager
 from .storage import SlotSentryStore
@@ -166,7 +166,7 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
                     "name": "slotsentry-panel",
                     "embed_iframe": False,
                     "trust_external": False,
-                    "js_url": "/local/slotsentry/slotsentry-panel.js",
+                    "js_url": f"/local/slotsentry/slotsentry-panel.js?v={VERSION}",
                 }
             },
             require_admin=True,

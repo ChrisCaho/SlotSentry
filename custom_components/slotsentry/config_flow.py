@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.5
+Revision: 1.6
 """
 
 from __future__ import annotations
@@ -29,6 +29,9 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
 )
 
 from .const import (
@@ -51,10 +54,12 @@ from .const import (
     DOMAIN,
     MAX_CODE_LENGTH,
     MAX_LONG_CODE_LENGTH,
+    MAX_PASSWORD_LENGTH,
     MAX_SHORT_CODE_LENGTH,
     MAX_SLOTS,
     MIN_CODE_LENGTH,
     MIN_LONG_CODE_LENGTH,
+    MIN_PASSWORD_LENGTH,
     MIN_SHORT_CODE_LENGTH,
 )
 
@@ -182,16 +187,24 @@ def _build_lock_options_plain(locks: list[dict[str, Any]]) -> list[SelectOptionD
 async def _async_get_max_user_codes(
     hass: HomeAssistant, entity_id: str
 ) -> int | None:
-    """Query the Z-Wave User Code CC for the supported number of code slots."""
+    """Query the Z-Wave User Code CC for the supported number of code slots.
+
+    Two approaches, tried in order:
+      1. invoke_cc_api with ``getUsersCount`` — sends a UserCodeCCUsersNumberGet
+         command to the device and returns the count directly.
+      2. Iterate cached node values — counts ``userIdStatus`` property keys
+         already cached by Z-Wave JS from the node interview. No RF traffic.
+    """
+    # -- Approach 1: getUsersCount via CC API --
     try:
         response = await hass.services.async_call(
             "zwave_js",
             "invoke_cc_api",
             {
                 "entity_id": entity_id,
-                "command_class": "User Code",
+                "command_class": 99,
                 "endpoint": 0,
-                "method_name": "getUsersNumber",
+                "method_name": "getUsersCount",
                 "parameters": [],
             },
             blocking=True,
@@ -199,20 +212,59 @@ async def _async_get_max_user_codes(
         )
         if isinstance(response, dict):
             payload = response.get(entity_id, response)
+            # getUsersCount returns a plain integer.
+            if isinstance(payload, int) and payload > 0:
+                _LOGGER.info(
+                    "getUsersCount reports %d slots for %s", payload, entity_id,
+                )
+                return payload
+            # Some versions may wrap in a dict.
             if isinstance(payload, dict):
                 count = payload.get("supportedUsers")
                 if isinstance(count, int) and count > 0:
-                    _LOGGER.debug(
-                        "User Code CC reports %d slots for %s",
+                    _LOGGER.info(
+                        "getUsersCount (dict) reports %d slots for %s",
                         count,
                         entity_id,
                     )
                     return count
     except Exception:  # noqa: BLE001
-        _LOGGER.debug(
-            "Could not query User Code CC for %s; will try state attributes",
-            entity_id,
+        _LOGGER.debug("getUsersCount CC API failed for %s", entity_id)
+
+    # -- Approach 2: count cached userIdStatus values from the node --
+    try:
+        from homeassistant.components.zwave_js.helpers import (
+            async_get_node_from_entity_id,
         )
+        from zwave_js_server.util.node import get_value_id_str
+
+        node_info = async_get_node_from_entity_id(hass, entity_id)
+        # async_get_node_from_entity_id returns (node, ...) or just node
+        # depending on HA version — handle both.
+        node = node_info[0] if isinstance(node_info, tuple) else node_info
+
+        slot = 1
+        while slot <= 254:
+            value_id = get_value_id_str(
+                node, 99, "userIdStatus", endpoint=0, property_key=slot,
+            )
+            if value_id not in node.values:
+                break
+            slot += 1
+        count = slot - 1
+        if count > 0:
+            _LOGGER.info(
+                "Node value iteration found %d slots for %s", count, entity_id,
+            )
+            return count
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug(
+            "Node value iteration failed for %s", entity_id, exc_info=True,
+        )
+
+    _LOGGER.warning(
+        "Could not discover slot count for %s via any method", entity_id,
+    )
     return None
 
 
@@ -378,10 +430,16 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     if lock["entity_id"] in selected
                 }
 
+                self._code_length_mode = (
+                    CODE_LENGTH_DUAL if dual_mode else CODE_LENGTH_SINGLE
+                )
+
+                # If slot count discovery failed, ask the user.
+                if not slot_counts:
+                    return await self.async_step_slot_count()
+
                 if dual_mode:
-                    self._code_length_mode = CODE_LENGTH_DUAL
                     return await self.async_step_code_length_dual()
-                self._code_length_mode = CODE_LENGTH_SINGLE
                 return await self.async_step_code_length_single()
 
         # Build lock options with capability annotations.
@@ -441,6 +499,41 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             last_step=False,
             description_placeholders={"discovery_notice": discovery_notice},
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2b: Slot Count (shown only when auto-discovery fails)
+    # ------------------------------------------------------------------
+
+    async def async_step_slot_count(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user manually set the slot count when auto-discovery fails."""
+        if user_input is not None:
+            self._slot_count = int(user_input.get(CONF_SLOT_COUNT, 30))
+            if self._code_length_mode == CODE_LENGTH_DUAL:
+                return await self.async_step_code_length_dual()
+            return await self.async_step_code_length_single()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SLOT_COUNT, default=self._slot_count or 30
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1,
+                        max=MAX_SLOTS,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="slot_count",
+            data_schema=schema,
+            last_step=False,
         )
 
     # ------------------------------------------------------------------
@@ -569,39 +662,68 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_lockout(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Configure optional keypad lockout trigger with multiple states."""
+        """Configure optional keypad lockout trigger with multiple states.
+
+        Validation matrix (toggle × trigger × state):
+          OFF + no trigger + no state         → proceed (lockout disabled)
+          OFF + trigger or state present       → error: turn on toggle or remove
+          ON  + trigger + state + participating → proceed (lockout enabled)
+          ON  + missing any required field      → error: specific field errors
+        """
         errors: dict[str, str] = {}
 
         if user_input is not None:
             enabled: bool = user_input.get(CONF_LOCKOUT_ENABLED, False)
+            trigger_entity = user_input.get(CONF_LOCKOUT_TRIGGER_ENTITY)
+            target_states: list[str] = user_input.get(
+                CONF_LOCKOUT_TARGET_STATES, []
+            )
+            participating: list[str] = user_input.get(
+                CONF_LOCKOUT_PARTICIPATING_LOCKS, []
+            )
+
+            has_trigger = bool(trigger_entity)
+            has_states = bool(target_states)
+
+            _LOGGER.debug(
+                "Lockout step: enabled=%s, trigger=%s, states=%s, "
+                "participating=%s, has_trigger=%s, has_states=%s",
+                enabled, trigger_entity, target_states,
+                participating, has_trigger, has_states,
+            )
 
             if enabled:
-                trigger_entity = user_input.get(CONF_LOCKOUT_TRIGGER_ENTITY)
-                target_states: list[str] = user_input.get(
-                    CONF_LOCKOUT_TARGET_STATES, []
-                )
-                participating: list[str] = user_input.get(
-                    CONF_LOCKOUT_PARTICIPATING_LOCKS, []
-                )
-
-                if not trigger_entity:
+                # Toggle ON — all three fields required.
+                if not has_trigger:
                     errors[CONF_LOCKOUT_TRIGGER_ENTITY] = "no_lockout_trigger"
-                elif not target_states:
+                if not has_states:
                     errors[CONF_LOCKOUT_TARGET_STATES] = "no_lockout_states"
-                elif not participating:
+                if not participating:
                     errors[CONF_LOCKOUT_PARTICIPATING_LOCKS] = "no_lockout_locks"
+                if errors:
+                    errors["base"] = "lockout_incomplete"
                 else:
                     self._lockout_enabled = True
                     self._lockout_trigger_entity = trigger_entity
                     self._lockout_target_states = target_states
                     self._lockout_participating_locks = participating
                     return await self.async_step_secure_mode()
+            elif has_trigger or has_states:
+                # Toggle OFF but fields filled — user must enable or clear.
+                errors["base"] = "lockout_incomplete"
+                if has_trigger:
+                    errors[CONF_LOCKOUT_TRIGGER_ENTITY] = "lockout_incomplete"
+                if has_states:
+                    errors[CONF_LOCKOUT_TARGET_STATES] = "lockout_incomplete"
             else:
+                # Toggle OFF, no trigger, no state → disabled, proceed.
                 self._lockout_enabled = False
                 self._lockout_trigger_entity = None
                 self._lockout_target_states = []
                 self._lockout_participating_locks = []
                 return await self.async_step_secure_mode()
+
+            _LOGGER.warning("Lockout validation errors: %s", errors)
 
         # Build lock options (plain names — no capability annotations).
         lock_labels: list[dict[str, Any]] = []
@@ -615,15 +737,24 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             SelectOptionDict(value=s, label=s) for s in _LOCKOUT_STATE_SUGGESTIONS
         ]
 
-        default_states = self._lockout_target_states or []
-        default_participating = (
-            self._lockout_participating_locks or list(self._lock_entities)
-        )
+        # Preserve user input on re-render after validation errors.
+        if user_input is not None:
+            default_enabled = user_input.get(CONF_LOCKOUT_ENABLED, self._lockout_enabled)
+            default_states = user_input.get(CONF_LOCKOUT_TARGET_STATES, [])
+            default_participating = user_input.get(
+                CONF_LOCKOUT_PARTICIPATING_LOCKS, list(self._lock_entities)
+            )
+        else:
+            default_enabled = self._lockout_enabled
+            default_states = self._lockout_target_states or []
+            default_participating = (
+                self._lockout_participating_locks or list(self._lock_entities)
+            )
 
         schema = vol.Schema(
             {
                 vol.Required(
-                    CONF_LOCKOUT_ENABLED, default=self._lockout_enabled
+                    CONF_LOCKOUT_ENABLED, default=default_enabled
                 ): BooleanSelector(),
                 vol.Optional(CONF_LOCKOUT_TRIGGER_ENTITY): EntitySelector(
                     EntitySelectorConfig()
@@ -666,22 +797,59 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_secure_mode(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Optionally enable Secure Mode for PIN code storage encryption."""
+        """Optionally enable Secure Mode for PIN code storage encryption.
+
+        When enabled, password + password confirm are required on the same form.
+        """
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            self._secure_mode = user_input.get(CONF_SECURE_MODE, False)
-            return await self.async_step_confirm()
+            enabled = user_input.get(CONF_SECURE_MODE, False)
+            password = user_input.get("secure_password", "")
+            password_confirm = user_input.get("secure_password_confirm", "")
+            has_password_data = bool(password or password_confirm)
+
+            if enabled:
+                # Secure mode ON — require matching passwords >= 8 chars.
+                if not password:
+                    errors["secure_password"] = "password_required"
+                elif len(password) < MIN_PASSWORD_LENGTH:
+                    errors["secure_password"] = "password_too_short"
+                elif len(password) > MAX_PASSWORD_LENGTH:
+                    errors["secure_password"] = "password_too_long"
+                elif password != password_confirm:
+                    errors["secure_password_confirm"] = "password_mismatch"
+                else:
+                    self._secure_mode = True
+                    # Password will be hashed/stored during entry setup
+                    return await self.async_step_confirm()
+            elif has_password_data:
+                # Secure mode OFF but password fields not empty — user
+                # must clear them or enable secure mode.
+                errors["secure_password"] = "password_without_secure_mode"
+            else:
+                # Secure mode OFF, no password data — proceed.
+                self._secure_mode = False
+                return await self.async_step_confirm()
 
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_SECURE_MODE, default=self._secure_mode
                 ): BooleanSelector(),
+                vol.Optional("secure_password", default=""): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional("secure_password_confirm", default=""): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
             }
         )
 
         return self.async_show_form(
             step_id="secure_mode",
             data_schema=schema,
+            errors=errors,
             last_step=False,
         )
 
@@ -725,7 +893,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema({}),
-            last_step=False,
+            last_step=True,
             description_placeholders={
                 "lock_count": str(len(self._lock_entities)),
                 "lock_list": lock_list,

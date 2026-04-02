@@ -8,7 +8,7 @@ Owns all slot state, coordinates disk persistence via SlotSentryStore,
 delegates lock operations to LockCommitMachine instances, and fires HA
 events so sensor entities can reactively update.
 
-Revision: 1.1 — push engine removed; all pushing delegated to LockCommitMachine.
+Revision: 1.2 — fix out-of-range code fallback; empty slots init as synced.
 """
 
 from __future__ import annotations
@@ -136,9 +136,27 @@ class SlotManager:
         """
         await self._store.async_load()
 
+        # Ensure all slot numbers 1…slot_count exist in storage.
+        # On first run the storage file has zero slots; this populates
+        # empty SlotData entries so the frontend can display editable rows.
+        existing_slots = self._store.get_slots()
+        for n in range(1, self.slot_count + 1):
+            if n not in existing_slots:
+                self._store.set_slot(SlotData.empty(n))
+
         # Ensure every configured backend has commit entries for all slots.
         for lock_entity in self._backends:
             self._store.initialise_lock_commits(lock_entity, self.slot_count)
+
+        # On fresh setup, mark empty slots as synced (nothing to push).
+        existing_slots = self._store.get_slots()
+        for lock_entity in self._backends:
+            for sn, slot in existing_slots.items():
+                if not slot.long_code and not slot.short_code and not slot.label:
+                    commit = self._store.get_lock_commit(lock_entity, sn)
+                    if commit.state == SYNC_OUT_OF_SYNC and commit.pushed_at is None:
+                        commit.state = SYNC_SYNCED
+                        self._store.set_lock_commit(lock_entity, commit)
 
         # Create one LockCommitMachine per lock backend.
         for lock_entity, backend in self._backends.items():
@@ -233,7 +251,6 @@ class SlotManager:
             updated_at="",
         )
         self._store.set_slot(slot)
-        await self._store.async_save()
 
         # -- Dirty detection: mark lock commits out_of_sync where needed -------
         self._mark_dirty_commits(slot_number, label, long_code, short_code)
@@ -392,14 +409,14 @@ class SlotManager:
             code = slot.long_code or slot.short_code
             if code and _code_in_range(code, code_range):
                 return code
-            return code if code else None
+            return None
 
         if slot.long_code and _code_in_range(slot.long_code, code_range):
             return slot.long_code
         if slot.short_code and _code_in_range(slot.short_code, code_range):
             return slot.short_code
 
-        return slot.get_active_code()
+        return None
 
     def _mark_dirty_commits(
         self,
