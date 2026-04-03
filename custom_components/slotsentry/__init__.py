@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.3
+Revision: 1.6
 """
 
 from __future__ import annotations
@@ -22,7 +22,8 @@ from homeassistant.components.frontend import (
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_LOCK_ENTITIES, DOMAIN, PLATFORMS, VERSION
+from .const import CONF_LOCK_ENTITIES, CONF_SECURE_MODE, DOMAIN, PLATFORMS, VERSION
+from .crypto import SecureSession
 from .lock_backend import ZWaveJSBackend
 from .slot_manager import SlotManager
 from .storage import SlotSentryStore
@@ -41,6 +42,7 @@ class SlotSentryData:
 
     slot_manager: SlotManager | None = None
     lock_backends: dict[str, LockBackend] = field(default_factory=dict)
+    secure_session: SecureSession = field(default_factory=SecureSession)
 
 
 type SlotSentryConfigEntry = ConfigEntry[SlotSentryData]
@@ -124,6 +126,44 @@ async def async_unload_entry(
             _LOGGER.error("Failed to remove sidebar panel: %s", err)
 
     return unload_ok
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: SlotSentryConfigEntry,
+) -> None:
+    """Clean up when the user permanently removes the integration.
+
+    Deletes:
+      - The SlotSentry storage file (.storage/slotsentry.<entry_id>)
+      - The copied panel JS directory (www/slotsentry/)
+    """
+    _LOGGER.info("Removing SlotSentry integration — cleaning up")
+
+    # Delete storage file.
+    store = SlotSentryStore(hass, entry.entry_id)
+    try:
+        await store.async_remove()
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "Failed to remove storage file for entry %s",
+            entry.entry_id,
+            exc_info=True,
+        )
+
+    # Delete copied panel JS directory.
+    panel_dir = Path(hass.config.path("www", "slotsentry"))
+    if panel_dir.is_dir():
+        try:
+            await hass.async_add_executor_job(shutil.rmtree, panel_dir)
+            _LOGGER.debug("Removed panel JS directory: %s", panel_dir)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Failed to remove panel JS directory: %s",
+                panel_dir,
+                exc_info=True,
+            )
+
+    _LOGGER.info("SlotSentry cleanup complete")
 
 
 def _copy_panel_js(hass: HomeAssistant) -> None:

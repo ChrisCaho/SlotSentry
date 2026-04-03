@@ -16,7 +16,7 @@ Command overview:
   slotsentry/push_lock   — Push all dirty slots to one specific lock.
   slotsentry/get_status  — Return per-lock sync summary.
 
-Revision: 1.1 — require_admin, get_config allow-list, slot_number bounds.
+Revision: 1.2 — secure mode: unlock/lock/secure_status, code masking when locked.
 """
 
 from __future__ import annotations
@@ -39,16 +39,21 @@ from .const import (
     CONF_LOCKOUT_PARTICIPATING_LOCKS,
     CONF_LOCKOUT_TARGET_STATES,
     CONF_LOCKOUT_TRIGGER_ENTITY,
+    CONF_SECURE_ENCRYPTION_SALT,
     CONF_SECURE_MODE,
+    CONF_SECURE_PASSWORD_HASH,
     CONF_SLOT_COUNT,
     DOMAIN,
     WS_DELETE_SLOT,
     WS_GET_CONFIG,
     WS_GET_SLOTS,
     WS_GET_STATUS,
+    WS_LOCK,
     WS_PUSH_ALL,
     WS_PUSH_LOCK,
+    WS_SECURE_STATUS,
     WS_SET_SLOT,
+    WS_UNLOCK,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,23 +108,68 @@ def _get_slot_manager(
     return slot_manager
 
 
-def _slot_data_to_dict(slot: Any) -> dict[str, Any]:
+def _is_secure_mode(hass: HomeAssistant, entry_id: str) -> bool:
+    """Return True if this config entry has secure mode enabled."""
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None:
+        return False
+    return bool(entry.data.get(CONF_SECURE_MODE, False))
+
+
+def _require_unlocked(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> bool:
+    """Check if secure mode is active and the session is unlocked.
+
+    Returns True if access is allowed, False if blocked (error sent).
+    """
+    entry_id = msg["entry_id"]
+    if not _is_secure_mode(hass, entry_id):
+        return True
+
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Entry not found")
+        return False
+
+    session = entry.runtime_data.secure_session
+    if not session.is_unlocked:
+        connection.send_error(
+            msg["id"],
+            "locked",
+            "Secure mode is active. Unlock the panel with your password first.",
+        )
+        return False
+    return True
+
+
+def _slot_data_to_dict(slot: Any, mask_codes: bool = False) -> dict[str, Any]:
     """Serialise a SlotData instance to a plain dict for the WebSocket response.
 
-    NOTE: In secure mode (future implementation), codes would be masked here.
-    For now they are returned as plaintext.
+    When ``mask_codes`` is True, PIN codes are replaced with asterisks
+    to indicate a code is set without revealing its value.
 
     Args:
         slot: A ``SlotData`` dataclass instance from storage.
+        mask_codes: If True, replace codes with masked placeholders.
 
     Returns:
         A JSON-serialisable dict suitable for sending to the frontend.
     """
+    if mask_codes:
+        long_code = "****" if slot.long_code else ""
+        short_code = "****" if slot.short_code else ""
+    else:
+        long_code = slot.long_code
+        short_code = slot.short_code
+
     return {
         "slot_number": slot.slot_number,
         "label": slot.label,
-        "long_code": slot.long_code,
-        "short_code": slot.short_code,
+        "long_code": long_code,
+        "short_code": short_code,
         "enabled": slot.enabled,
         "created_at": slot.created_at,
         "updated_at": slot.updated_at,
@@ -155,23 +205,33 @@ async def ws_get_slots(
         slots (list[dict]): Ordered list of slot dicts, each containing
             slot_number, label, long_code, short_code, enabled,
             created_at, updated_at.
+        locked (bool): True if secure mode is active and codes are masked.
 
-    NOTE: Codes are returned as plaintext.  A future secure-mode
-    implementation will mask them behind session authentication.
+    When secure mode is active but the session is locked, codes are
+    returned as masked placeholders ("****") so the panel can show
+    slot structure without revealing PINs.
     """
     slot_manager = _get_slot_manager(hass, connection, msg)
     if slot_manager is None:
         return
 
+    # Determine whether to mask codes.
+    secure = _is_secure_mode(hass, msg["entry_id"])
+    locked = False
+    if secure:
+        entry = hass.config_entries.async_get_entry(msg["entry_id"])
+        if entry is not None:
+            locked = not entry.runtime_data.secure_session.is_unlocked
+
     slots_by_number = await slot_manager.async_get_slots()
 
     # Sort by slot number for a stable, predictable order.
     slot_list = [
-        _slot_data_to_dict(slot)
+        _slot_data_to_dict(slot, mask_codes=locked)
         for slot in sorted(slots_by_number.values(), key=lambda s: s.slot_number)
     ]
 
-    connection.send_result(msg["id"], {"slots": slot_list})
+    connection.send_result(msg["id"], {"slots": slot_list, "locked": locked})
     _LOGGER.debug(
         "ws_get_slots: returned %d slot(s) for entry %s",
         len(slot_list),
@@ -206,6 +266,8 @@ async def ws_set_slot(
 
     WebSocket command: ``slotsentry/set_slot``
 
+    Requires an unlocked secure session when secure mode is active.
+
     Request fields:
         entry_id    (str):  The config entry ID.
         slot_number (int):  1-based slot index to write.
@@ -221,6 +283,9 @@ async def ws_set_slot(
         An error result with code ``"invalid_input"`` and a message
         describing the validation failure (label uniqueness, code length).
     """
+    if not _require_unlocked(hass, connection, msg):
+        return
+
     slot_manager = _get_slot_manager(hass, connection, msg)
     if slot_manager is None:
         return
@@ -274,6 +339,8 @@ async def ws_delete_slot(
 
     WebSocket command: ``slotsentry/delete_slot``
 
+    Requires an unlocked secure session when secure mode is active.
+
     Clearing a slot resets its label, codes, and enabled flag.  The slot
     entry itself is preserved in storage (to maintain the slot_count
     invariant).  All lock commits for this slot are marked out_of_sync so
@@ -286,6 +353,9 @@ async def ws_delete_slot(
     Response fields:
         success (bool): True.
     """
+    if not _require_unlocked(hass, connection, msg):
+        return
+
     slot_manager = _get_slot_manager(hass, connection, msg)
     if slot_manager is None:
         return
@@ -331,10 +401,15 @@ async def ws_push_all(
     Request fields:
         entry_id (str): The config entry ID.
 
+    Requires an unlocked secure session when secure mode is active.
+
     Response fields:
         success (bool): True — indicates the push was initiated, not that
                         it has completed on all locks.
     """
+    if not _require_unlocked(hass, connection, msg):
+        return
+
     slot_manager = _get_slot_manager(hass, connection, msg)
     if slot_manager is None:
         return
@@ -378,10 +453,15 @@ async def ws_push_lock(
     Response fields on success:
         success (bool): True.
 
+    Requires an unlocked secure session when secure mode is active.
+
     Response on error:
         An error result with code ``"not_found"`` when the lock entity is
         not among the configured backends for this entry.
     """
+    if not _require_unlocked(hass, connection, msg):
+        return
+
     slot_manager = _get_slot_manager(hass, connection, msg)
     if slot_manager is None:
         return
@@ -522,6 +602,208 @@ async def ws_get_config(
 
 
 # ---------------------------------------------------------------------------
+# WS command: unlock (secure mode)
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_UNLOCK,
+        vol.Required("entry_id"): str,
+        vol.Required("password"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_unlock(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Unlock the secure mode session with a password.
+
+    WebSocket command: ``slotsentry/unlock``
+
+    Request fields:
+        entry_id (str): The config entry ID.
+        password (str): The user's password.
+
+    Response fields on success:
+        success (bool): True.
+        token   (str):  Session token for subsequent requests.
+
+    Response on error:
+        code ``"invalid_password"``: Wrong password.
+        code ``"locked_out"``:       Too many failed attempts.
+        code ``"not_secure"``:       Secure mode is not enabled.
+    """
+    entry_id: str = msg["entry_id"]
+    entry = hass.config_entries.async_get_entry(entry_id)
+
+    if entry is None or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Entry not found")
+        return
+
+    if not entry.data.get(CONF_SECURE_MODE, False):
+        connection.send_error(
+            msg["id"], "not_secure", "Secure mode is not enabled"
+        )
+        return
+
+    session = entry.runtime_data.secure_session
+
+    if session.is_locked_out:
+        connection.send_error(
+            msg["id"],
+            "locked_out",
+            "Too many failed attempts. Restart Home Assistant to reset.",
+        )
+        return
+
+    stored_hash = entry.data.get(CONF_SECURE_PASSWORD_HASH)
+    if not stored_hash:
+        connection.send_error(
+            msg["id"],
+            "not_configured",
+            "Secure mode is enabled but no password hash is stored. "
+            "Reconfigure the integration to set a password.",
+        )
+        return
+
+    from .crypto import derive_encryption_key, verify_password  # noqa: E402
+    from base64 import b64decode  # noqa: E402
+
+    password: str = msg["password"]
+
+    if not verify_password(password, stored_hash):
+        session.record_failed_attempt()
+        remaining = 5 - session.failed_attempts
+        connection.send_error(
+            msg["id"],
+            "invalid_password",
+            f"Incorrect password. {max(remaining, 0)} attempts remaining.",
+        )
+        return
+
+    # Derive encryption key from password + encryption salt.
+    enc_salt_b64 = entry.data.get(CONF_SECURE_ENCRYPTION_SALT, "")
+    if enc_salt_b64:
+        enc_salt = b64decode(enc_salt_b64)
+    else:
+        # Fallback: use the password hash salt (shouldn't happen normally).
+        enc_salt = b64decode(stored_hash["salt"])
+
+    key = derive_encryption_key(password, enc_salt)
+    token = session.unlock(key)
+
+    # Decrypt codes in memory so the push engine and UI can access them.
+    slot_manager = entry.runtime_data.slot_manager
+    if slot_manager is not None:
+        slot_manager.decrypt_codes_in_memory(key)
+
+    connection.send_result(msg["id"], {"success": True, "token": token})
+    _LOGGER.info("ws_unlock: secure session unlocked for entry %s", entry_id)
+
+
+# ---------------------------------------------------------------------------
+# WS command: lock (secure mode)
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_LOCK,
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_lock(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Lock the secure mode session, wiping the encryption key from memory.
+
+    WebSocket command: ``slotsentry/lock``
+
+    Request fields:
+        entry_id (str): The config entry ID.
+
+    Response fields:
+        success (bool): True.
+    """
+    entry_id: str = msg["entry_id"]
+    entry = hass.config_entries.async_get_entry(entry_id)
+
+    if entry is None or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Entry not found")
+        return
+
+    # Re-encrypt codes in memory before locking the session.
+    session = entry.runtime_data.secure_session
+    slot_manager = entry.runtime_data.slot_manager
+    key = session.encryption_key
+    if slot_manager is not None and key is not None:
+        slot_manager.encrypt_codes_in_memory(key)
+
+    session.lock()
+
+    connection.send_result(msg["id"], {"success": True})
+    _LOGGER.info("ws_lock: secure session locked for entry %s", entry_id)
+
+
+# ---------------------------------------------------------------------------
+# WS command: secure_status
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_SECURE_STATUS,
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_secure_status(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return the current secure mode status.
+
+    WebSocket command: ``slotsentry/secure_status``
+
+    Request fields:
+        entry_id (str): The config entry ID.
+
+    Response fields:
+        secure_mode (bool): Whether secure mode is enabled.
+        unlocked    (bool): Whether the session is currently unlocked.
+        locked_out  (bool): Whether too many failed attempts have occurred.
+    """
+    entry_id: str = msg["entry_id"]
+    entry = hass.config_entries.async_get_entry(entry_id)
+
+    if entry is None or entry.domain != DOMAIN:
+        connection.send_error(msg["id"], "not_found", "Entry not found")
+        return
+
+    secure = bool(entry.data.get(CONF_SECURE_MODE, False))
+    session = entry.runtime_data.secure_session
+
+    connection.send_result(
+        msg["id"],
+        {
+            "secure_mode": secure,
+            "unlocked": session.is_unlocked if secure else True,
+            "locked_out": session.is_locked_out if secure else False,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -544,10 +826,13 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_push_all)
     websocket_api.async_register_command(hass, ws_push_lock)
     websocket_api.async_register_command(hass, ws_get_status)
+    websocket_api.async_register_command(hass, ws_unlock)
+    websocket_api.async_register_command(hass, ws_lock)
+    websocket_api.async_register_command(hass, ws_secure_status)
 
     _LOGGER.debug(
         "SlotSentry: registered %d WebSocket command(s): %s",
-        7,
+        10,
         ", ".join(
             [
                 WS_GET_CONFIG,
@@ -557,6 +842,9 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
                 WS_PUSH_ALL,
                 WS_PUSH_LOCK,
                 WS_GET_STATUS,
+                WS_UNLOCK,
+                WS_LOCK,
+                WS_SECURE_STATUS,
             ]
         ),
     )

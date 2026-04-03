@@ -10,11 +10,12 @@ which provides atomic writes and built-in file locking.
 Storage file: .storage/slotsentry.<entry_id>
 Schema version: 1
 
-Revision: 1.0
+Revision: 1.2 — secure mode encryption at rest for PIN codes.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 from dataclasses import dataclass, field
@@ -342,6 +343,128 @@ class SlotSentryStore:
             )
         await self._store.async_save(self._data)
         _LOGGER.debug("SlotSentry storage saved to disk")
+
+    async def async_remove(self) -> None:
+        """Delete the storage file from disk permanently.
+
+        Called during ``async_remove_entry`` when the user fully removes
+        the integration. After this call the store instance is unusable.
+        """
+        await self._store.async_remove()
+        self._data = None
+        _LOGGER.info("SlotSentry storage file removed from disk")
+
+    # ------------------------------------------------------------------
+    # Secure mode: encryption at rest
+    # ------------------------------------------------------------------
+
+    @property
+    def is_encrypted(self) -> bool:
+        """True if the on-disk data has encrypted codes.
+
+        The ``"encrypted"`` flag is set in the root of the storage dict
+        when codes are saved with encryption.  It is cleared when codes
+        are saved in plaintext.
+        """
+        self._require_loaded()
+        assert self._data is not None
+        return bool(self._data.get("encrypted", False))
+
+    def decrypt_codes(self, key: bytes) -> None:
+        """Decrypt all PIN codes in memory using the given AES key.
+
+        After this call, ``long_code`` and ``short_code`` fields in every
+        slot contain plaintext values.  Safe to call on already-decrypted
+        data (encrypted strings contain a ``:`` separator; digit-only
+        strings are assumed to already be plaintext).
+
+        Args:
+            key: 32-byte AES-256 key from ``crypto.derive_encryption_key``.
+        """
+        self._require_loaded()
+        assert self._data is not None
+
+        from .crypto import decrypt_code  # noqa: E402
+
+        slots = self._data.get("slots", {})
+        decrypted_count = 0
+        for slot_key, slot_data in slots.items():
+            for code_field in ("long_code", "short_code"):
+                raw = slot_data.get(code_field, "")
+                if raw and ":" in raw:
+                    # Looks like an encrypted value (nonce:ciphertext).
+                    try:
+                        slot_data[code_field] = decrypt_code(raw, key)
+                        decrypted_count += 1
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.error(
+                            "Failed to decrypt %s for slot %s",
+                            code_field,
+                            slot_key,
+                        )
+                        slot_data[code_field] = ""
+
+        self._data["encrypted"] = False
+        _LOGGER.info("Decrypted %d code field(s) in memory", decrypted_count)
+
+    def encrypt_codes(self, key: bytes) -> None:
+        """Encrypt all PIN codes in memory using the given AES key.
+
+        After this call, ``long_code`` and ``short_code`` fields contain
+        AES-GCM encrypted values.  Safe to call on already-encrypted data.
+
+        Args:
+            key: 32-byte AES-256 key from ``crypto.derive_encryption_key``.
+        """
+        self._require_loaded()
+        assert self._data is not None
+
+        from .crypto import encrypt_code  # noqa: E402
+
+        slots = self._data.get("slots", {})
+        encrypted_count = 0
+        for slot_key, slot_data in slots.items():
+            for code_field in ("long_code", "short_code"):
+                raw = slot_data.get(code_field, "")
+                if raw and ":" not in raw:
+                    # Plaintext — encrypt it.
+                    slot_data[code_field] = encrypt_code(raw, key)
+                    encrypted_count += 1
+
+        self._data["encrypted"] = True
+        _LOGGER.info("Encrypted %d code field(s) in memory", encrypted_count)
+
+    async def async_save_encrypted(self, key: bytes) -> None:
+        """Save to disk with codes encrypted, then restore plaintext in memory.
+
+        This is the secure-mode save path.  It:
+          1. Makes a deep copy of ``_data``.
+          2. Encrypts codes in the copy.
+          3. Writes the encrypted copy to disk.
+          4. Leaves ``_data`` in its original (plaintext) state.
+
+        Args:
+            key: 32-byte AES-256 key.
+        """
+        if self._data is None:
+            raise RuntimeError(
+                "SlotSentryStore.async_save_encrypted() called before async_load()"
+            )
+
+        from .crypto import encrypt_code  # noqa: E402
+
+        # Deep copy so we don't mutate the live data.
+        disk_data = copy.deepcopy(self._data)
+        slots = disk_data.get("slots", {})
+        for slot_data in slots.values():
+            for code_field in ("long_code", "short_code"):
+                raw = slot_data.get(code_field, "")
+                if raw and ":" not in raw:
+                    slot_data[code_field] = encrypt_code(raw, key)
+
+        disk_data["encrypted"] = True
+        await self._store.async_save(disk_data)
+        _LOGGER.debug("SlotSentry storage saved (encrypted) to disk")
 
     # ------------------------------------------------------------------
     # Slot accessors

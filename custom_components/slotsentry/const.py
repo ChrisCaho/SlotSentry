@@ -4,12 +4,12 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.1
+Revision: 1.2
 """
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a4"
+VERSION = "2026.4.0a7"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 1
@@ -55,6 +55,9 @@ WS_PUSH_ALL = "slotsentry/push_all"
 WS_PUSH_LOCK = "slotsentry/push_lock"
 WS_GET_STATUS = "slotsentry/get_status"
 WS_GET_CONFIG = "slotsentry/get_config"
+WS_UNLOCK = "slotsentry/unlock"
+WS_LOCK = "slotsentry/lock"
+WS_SECURE_STATUS = "slotsentry/secure_status"
 
 # Commit state machine states
 STATE_IDLE = "idle"
@@ -83,6 +86,8 @@ CONF_CODE_LENGTH_SHORT = "code_length_short"
 CONF_CODE_LENGTH_LONG = "code_length_long"
 CONF_SLOT_COUNT = "slot_count"
 CONF_SECURE_MODE = "secure_mode"
+CONF_SECURE_PASSWORD_HASH = "secure_password_hash"
+CONF_SECURE_ENCRYPTION_SALT = "secure_encryption_salt"
 CONF_LOCKOUT_ENABLED = "lockout_enabled"
 CONF_LOCKOUT_TRIGGER_ENTITY = "lockout_trigger_entity"
 CONF_LOCKOUT_TARGET_STATE = "lockout_target_state"  # Legacy single-state key

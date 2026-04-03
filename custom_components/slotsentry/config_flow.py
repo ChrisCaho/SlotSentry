@@ -4,12 +4,15 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.6
+Revision: 1.9
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+from base64 import b64encode
 from typing import Any
 
 import voluptuous as vol
@@ -46,7 +49,9 @@ from .const import (
     CONF_LOCKOUT_PARTICIPATING_LOCKS,
     CONF_LOCKOUT_TARGET_STATES,
     CONF_LOCKOUT_TRIGGER_ENTITY,
+    CONF_SECURE_ENCRYPTION_SALT,
     CONF_SECURE_MODE,
+    CONF_SECURE_PASSWORD_HASH,
     CONF_SLOT_COUNT,
     DEFAULT_CODE_LENGTH_LONG,
     DEFAULT_CODE_LENGTH_SHORT,
@@ -189,49 +194,72 @@ async def _async_get_max_user_codes(
 ) -> int | None:
     """Query the Z-Wave User Code CC for the supported number of code slots.
 
-    Two approaches, tried in order:
-      1. invoke_cc_api with ``getUsersCount`` — sends a UserCodeCCUsersNumberGet
-         command to the device and returns the count directly.
-      2. Iterate cached node values — counts ``userIdStatus`` property keys
-         already cached by Z-Wave JS from the node interview. No RF traffic.
+    Three approaches, tried in order:
+      1. invoke_cc_api with ``getUsersCount`` (with one retry) — sends a
+         UserCodeCCUsersNumberGet command and returns the count directly.
+      2. Scan cached node ``userIdStatus`` values — finds the *highest*
+         slot number present in the Z-Wave JS node cache (gap-tolerant).
+      3. Returns None so the config flow can ask the user.
     """
-    # -- Approach 1: getUsersCount via CC API --
-    try:
-        response = await hass.services.async_call(
-            "zwave_js",
-            "invoke_cc_api",
-            {
-                "entity_id": entity_id,
-                "command_class": 99,
-                "endpoint": 0,
-                "method_name": "getUsersCount",
-                "parameters": [],
-            },
-            blocking=True,
-            return_response=True,
-        )
-        if isinstance(response, dict):
-            payload = response.get(entity_id, response)
-            # getUsersCount returns a plain integer.
-            if isinstance(payload, int) and payload > 0:
-                _LOGGER.info(
-                    "getUsersCount reports %d slots for %s", payload, entity_id,
-                )
-                return payload
-            # Some versions may wrap in a dict.
-            if isinstance(payload, dict):
-                count = payload.get("supportedUsers")
-                if isinstance(count, int) and count > 0:
+    # -- Approach 1: getUsersCount via CC API (with retry) --
+    for attempt in range(2):
+        try:
+            response = await hass.services.async_call(
+                "zwave_js",
+                "invoke_cc_api",
+                {
+                    "entity_id": entity_id,
+                    "command_class": 99,
+                    "endpoint": 0,
+                    "method_name": "getUsersCount",
+                    "parameters": [],
+                },
+                blocking=True,
+                return_response=True,
+            )
+            if isinstance(response, dict):
+                payload = response.get(entity_id, response)
+                # getUsersCount returns a plain integer.
+                if isinstance(payload, int) and payload > 0:
+                    capped = min(payload, MAX_SLOTS)
                     _LOGGER.info(
-                        "getUsersCount (dict) reports %d slots for %s",
-                        count,
-                        entity_id,
+                        "getUsersCount reports %d slots for %s",
+                        capped, entity_id,
                     )
-                    return count
-    except Exception:  # noqa: BLE001
-        _LOGGER.debug("getUsersCount CC API failed for %s", entity_id)
+                    return capped
+                # Some versions may wrap in a dict.
+                if isinstance(payload, dict):
+                    count = payload.get("supportedUsers")
+                    if isinstance(count, int) and count > 0:
+                        capped = min(count, MAX_SLOTS)
+                        _LOGGER.info(
+                            "getUsersCount (dict) reports %d slots for %s",
+                            capped,
+                            entity_id,
+                        )
+                        return capped
+            _LOGGER.warning(
+                "getUsersCount returned unusable response for %s "
+                "(attempt %d): %s",
+                entity_id,
+                attempt + 1,
+                response,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "getUsersCount CC API failed for %s (attempt %d)",
+                entity_id,
+                attempt + 1,
+                exc_info=True,
+            )
+        if attempt == 0:
+            await asyncio.sleep(2)
 
-    # -- Approach 2: count cached userIdStatus values from the node --
+    # -- Approach 2: scan cached userIdStatus values (gap-tolerant) --
+    # Instead of stopping at the first missing slot, scan up to a
+    # reasonable max and find the highest slot number present. This
+    # handles incomplete Z-Wave node interviews that leave gaps.
+    _SCAN_LIMIT = 50  # well above any residential lock capacity
     try:
         from homeassistant.components.zwave_js.helpers import (
             async_get_node_from_entity_id,
@@ -243,23 +271,27 @@ async def _async_get_max_user_codes(
         # depending on HA version — handle both.
         node = node_info[0] if isinstance(node_info, tuple) else node_info
 
-        slot = 1
-        while slot <= 254:
+        max_found = 0
+        for slot in range(1, _SCAN_LIMIT + 1):
             value_id = get_value_id_str(
                 node, 99, "userIdStatus", endpoint=0, property_key=slot,
             )
-            if value_id not in node.values:
-                break
-            slot += 1
-        count = slot - 1
-        if count > 0:
+            if value_id in node.values:
+                max_found = slot
+
+        if max_found > 0:
+            capped = min(max_found, MAX_SLOTS)
             _LOGGER.info(
-                "Node value iteration found %d slots for %s", count, entity_id,
+                "Node value scan found highest slot %d for %s "
+                "(scanned 1–%d)",
+                capped,
+                entity_id,
+                _SCAN_LIMIT,
             )
-            return count
+            return capped
     except Exception:  # noqa: BLE001
-        _LOGGER.debug(
-            "Node value iteration failed for %s", entity_id, exc_info=True,
+        _LOGGER.warning(
+            "Node value scan failed for %s", entity_id, exc_info=True,
         )
 
     _LOGGER.warning(
@@ -267,6 +299,124 @@ async def _async_get_max_user_codes(
     )
     return None
 
+
+async def _async_probe_lock_readback(
+    hass: HomeAssistant, entity_id: str
+) -> bool:
+    """Return True if the lock can return actual PIN digits for a code slot.
+
+    Probes slot 1 via the User Code CC ``get`` method. If the response
+    includes a non-empty ``userCode`` without asterisks, readback is
+    supported. Masked responses (asterisks) mean the lock is occupied but
+    unreadable.
+    """
+    try:
+        response = await hass.services.async_call(
+            "zwave_js",
+            "invoke_cc_api",
+            {
+                "entity_id": entity_id,
+                "command_class": 99,
+                "endpoint": 0,
+                "method_name": "get",
+                "parameters": [1],
+            },
+            blocking=True,
+            return_response=True,
+        )
+        if not isinstance(response, dict):
+            return False
+
+        payload = response.get(entity_id, response)
+        if isinstance(payload, dict):
+            user_code = payload.get("userCode")
+            user_status = payload.get("userIdStatus", 0)
+            # Status 0 = empty slot — can't tell if readback works.
+            # Non-zero status with actual digits = readable.
+            if user_status != 0 and user_code and "*" not in str(user_code):
+                _LOGGER.info(
+                    "Lock %s supports full readback (slot 1 returned digits)",
+                    entity_id,
+                )
+                return True
+            if user_status == 0:
+                _LOGGER.debug(
+                    "Lock %s slot 1 is empty — readback support unknown",
+                    entity_id,
+                )
+                return False
+            if user_code and "*" in str(user_code):
+                _LOGGER.info(
+                    "Lock %s returns masked codes (asterisks) — not readable",
+                    entity_id,
+                )
+                return False
+        return False
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug(
+            "Readback probe failed for %s", entity_id, exc_info=True,
+        )
+        return False
+
+
+async def _async_read_lock_codes(
+    hass: HomeAssistant, entity_id: str, max_slots: int,
+) -> dict[int, str]:
+    """Read all occupied code slots from a lock.
+
+    Returns a dict of ``{slot_number: code_string}`` for all slots that
+    contain actual digit codes (not empty, not masked).
+    """
+    codes: dict[int, str] = {}
+
+    for slot_num in range(1, max_slots + 1):
+        try:
+            response = await hass.services.async_call(
+                "zwave_js",
+                "invoke_cc_api",
+                {
+                    "entity_id": entity_id,
+                    "command_class": 99,
+                    "endpoint": 0,
+                    "method_name": "get",
+                    "parameters": [slot_num],
+                },
+                blocking=True,
+                return_response=True,
+            )
+            if not isinstance(response, dict):
+                continue
+
+            payload = response.get(entity_id, response)
+            if isinstance(payload, dict):
+                user_code = payload.get("userCode")
+                user_status = payload.get("userIdStatus", 0)
+                if (
+                    user_status != 0
+                    and user_code
+                    and isinstance(user_code, str)
+                    and user_code.isdigit()
+                ):
+                    codes[slot_num] = user_code
+                    _LOGGER.debug(
+                        "Read code from %s slot %d (len=%d)",
+                        entity_id,
+                        slot_num,
+                        len(user_code),
+                    )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Failed to read slot %d from %s", slot_num, entity_id,
+                exc_info=True,
+            )
+
+    _LOGGER.info(
+        "Read %d occupied code(s) from %s (scanned %d slots)",
+        len(codes),
+        entity_id,
+        max_slots,
+    )
+    return codes
 
 
 def _suggest_code_length_defaults(
@@ -324,6 +474,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         locks               — Discover locks (with capabilities), select + mode toggle.
         code_length_single  — Single code length slider (if mode = single).
         code_length_dual    — Short + Long sliders (if mode = dual).
+        seed                — Optional: seed slot data from a readable lock.
         lockout             — Optional keypad lockout with multi-state trigger.
         secure_mode         — Optional Secure Mode toggle.
         confirm             — Full configuration summary.
@@ -344,12 +495,17 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         self._code_length_short: int = DEFAULT_CODE_LENGTH_SHORT
         self._code_length_long: int = DEFAULT_CODE_LENGTH_LONG
 
+        # Seed from existing lock
+        self._readable_locks: dict[str, dict[int, str]] = {}
+        self._seed_slots: list[dict[str, Any]] = []
+
         self._lockout_enabled: bool = False
         self._lockout_trigger_entity: str | None = None
         self._lockout_target_states: list[str] = []
         self._lockout_participating_locks: list[str] = []
 
         self._secure_mode: bool = False
+        self._secure_password: str = ""
 
     # ------------------------------------------------------------------
     # Step 1: Welcome
@@ -562,7 +718,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             self._code_length_short = DEFAULT_CODE_LENGTH_SHORT
             self._code_length_long = DEFAULT_CODE_LENGTH_LONG
-            return await self.async_step_lockout()
+            return await self.async_step_seed()
 
         schema = vol.Schema(
             {
@@ -619,7 +775,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._code_length_short = short
                 self._code_length_long = long_
                 self._code_length_single = DEFAULT_CODE_LENGTH_SINGLE
-                return await self.async_step_lockout()
+                return await self.async_step_seed()
 
         schema = vol.Schema(
             {
@@ -656,7 +812,221 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     # ------------------------------------------------------------------
-    # Step 4: Keypad Lockout (optional, multi-state)
+    # Step 4: Seed From Existing Lock (optional)
+    # ------------------------------------------------------------------
+
+    async def async_step_seed(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Optionally seed slot data by reading codes from an existing lock.
+
+        Probes each selected lock for readback support, reads codes from
+        readable locks, and presents dropdown(s) to the user.
+
+        Single code length mode: one dropdown.
+        Dual code length mode: two dropdowns (one per code length).
+
+        Selecting "None" (the default) skips seeding.
+        """
+        _NONE_VALUE = "__none__"
+
+        # On first visit, probe locks and read codes.
+        if not self._readable_locks:
+            await self._async_discover_readable_locks()
+
+        if user_input is not None:
+            self._seed_slots = []
+
+            if self._code_length_mode == CODE_LENGTH_DUAL:
+                short_seed = user_input.get("seed_lock_short", _NONE_VALUE)
+                long_seed = user_input.get("seed_lock_long", _NONE_VALUE)
+                slot_num = 1
+
+                # Seed short codes.
+                if short_seed != _NONE_VALUE and short_seed in self._readable_locks:
+                    codes = self._readable_locks[short_seed]
+                    for _orig_slot, code in sorted(codes.items()):
+                        if len(code) == self._code_length_short:
+                            self._seed_slots.append({
+                                "slot_number": slot_num,
+                                "short_code": code,
+                                "long_code": "",
+                                "label": "",
+                                "enabled": True,
+                            })
+                            slot_num += 1
+                            if slot_num > self._slot_count:
+                                break
+
+                # Seed long codes — merge into existing seed slots or append.
+                if long_seed != _NONE_VALUE and long_seed in self._readable_locks:
+                    codes = self._readable_locks[long_seed]
+                    long_idx = 0
+                    for _orig_slot, code in sorted(codes.items()):
+                        if len(code) == self._code_length_long:
+                            if long_idx < len(self._seed_slots):
+                                self._seed_slots[long_idx]["long_code"] = code
+                            else:
+                                sn = len(self._seed_slots) + 1
+                                if sn <= self._slot_count:
+                                    self._seed_slots.append({
+                                        "slot_number": sn,
+                                        "short_code": "",
+                                        "long_code": code,
+                                        "label": "",
+                                        "enabled": True,
+                                    })
+                            long_idx += 1
+                            if len(self._seed_slots) >= self._slot_count:
+                                break
+            else:
+                # Single mode.
+                seed_lock = user_input.get("seed_lock", _NONE_VALUE)
+                if seed_lock != _NONE_VALUE and seed_lock in self._readable_locks:
+                    codes = self._readable_locks[seed_lock]
+                    slot_num = 1
+                    for _orig_slot, code in sorted(codes.items()):
+                        if len(code) == self._code_length_single:
+                            self._seed_slots.append({
+                                "slot_number": slot_num,
+                                "short_code": "",
+                                "long_code": code,
+                                "label": "",
+                                "enabled": True,
+                            })
+                            slot_num += 1
+                            if slot_num > self._slot_count:
+                                break
+
+            if self._seed_slots:
+                _LOGGER.info(
+                    "Seed: %d slot(s) will be pre-populated from lock data",
+                    len(self._seed_slots),
+                )
+            return await self.async_step_lockout()
+
+        # Build dropdown options.
+        none_option = SelectOptionDict(value=_NONE_VALUE, label="None")
+
+        if self._code_length_mode == CODE_LENGTH_DUAL:
+            short_options = [none_option]
+            long_options = [none_option]
+
+            for eid, codes in self._readable_locks.items():
+                name = _get_lock_name(self.hass, eid)
+                short_codes = [c for c in codes.values()
+                               if len(c) == self._code_length_short]
+                long_codes = [c for c in codes.values()
+                              if len(c) == self._code_length_long]
+                if short_codes:
+                    short_options.append(SelectOptionDict(
+                        value=eid,
+                        label=f"{name} ({len(short_codes)} codes, "
+                              f"{self._code_length_short} digits)",
+                    ))
+                if long_codes:
+                    long_options.append(SelectOptionDict(
+                        value=eid,
+                        label=f"{name} ({len(long_codes)} codes, "
+                              f"{self._code_length_long} digits)",
+                    ))
+
+            # If no readable locks for either length, show "None Available".
+            if len(short_options) == 1:
+                short_options = [SelectOptionDict(
+                    value=_NONE_VALUE, label="None Available"
+                )]
+            if len(long_options) == 1:
+                long_options = [SelectOptionDict(
+                    value=_NONE_VALUE, label="None Available"
+                )]
+
+            schema = vol.Schema({
+                vol.Required(
+                    "seed_lock_short", default=_NONE_VALUE
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=short_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "seed_lock_long", default=_NONE_VALUE
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=long_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            })
+        else:
+            # Single mode — one dropdown.
+            lock_options: list[SelectOptionDict] = [none_option]
+
+            for eid, codes in self._readable_locks.items():
+                name = _get_lock_name(self.hass, eid)
+                matching = [c for c in codes.values()
+                            if len(c) == self._code_length_single]
+                if matching:
+                    lock_options.append(SelectOptionDict(
+                        value=eid,
+                        label=f"{name} ({len(matching)} codes, "
+                              f"{self._code_length_single} digits)",
+                    ))
+
+            if len(lock_options) == 1:
+                lock_options = [SelectOptionDict(
+                    value=_NONE_VALUE, label="None Available"
+                )]
+
+            schema = vol.Schema({
+                vol.Required(
+                    "seed_lock", default=_NONE_VALUE
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=lock_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            })
+
+        return self.async_show_form(
+            step_id="seed",
+            data_schema=schema,
+            last_step=False,
+        )
+
+    async def _async_discover_readable_locks(self) -> None:
+        """Probe each selected lock for readback support and read codes.
+
+        Populates ``self._readable_locks`` with ``{entity_id: {slot: code}}``.
+        """
+        self._readable_locks = {}
+
+        for lock in self._available_locks:
+            eid = lock["entity_id"]
+            if eid not in self._lock_entities:
+                continue
+
+            max_slots = lock.get("slots") or self._slot_count or 30
+            _LOGGER.info("Probing %s for readback support...", eid)
+
+            readable = await _async_probe_lock_readback(self.hass, eid)
+            if not readable:
+                _LOGGER.info("Lock %s does not support readback, skipping", eid)
+                continue
+
+            _LOGGER.info(
+                "Lock %s supports readback — reading up to %d slots",
+                eid,
+                max_slots,
+            )
+            codes = await _async_read_lock_codes(self.hass, eid, max_slots)
+            if codes:
+                self._readable_locks[eid] = codes
+
+    # ------------------------------------------------------------------
+    # Step 5: Keypad Lockout (optional, multi-state)
     # ------------------------------------------------------------------
 
     async def async_step_lockout(
@@ -708,15 +1078,9 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._lockout_target_states = target_states
                     self._lockout_participating_locks = participating
                     return await self.async_step_secure_mode()
-            elif has_trigger or has_states:
-                # Toggle OFF but fields filled — user must enable or clear.
-                errors["base"] = "lockout_incomplete"
-                if has_trigger:
-                    errors[CONF_LOCKOUT_TRIGGER_ENTITY] = "lockout_incomplete"
-                if has_states:
-                    errors[CONF_LOCKOUT_TARGET_STATES] = "lockout_incomplete"
             else:
-                # Toggle OFF, no trigger, no state → disabled, proceed.
+                # Toggle OFF → disabled, proceed. Any filled fields are
+                # silently ignored (the toggle is the authoritative switch).
                 self._lockout_enabled = False
                 self._lockout_trigger_entity = None
                 self._lockout_target_states = []
@@ -740,12 +1104,14 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         # Preserve user input on re-render after validation errors.
         if user_input is not None:
             default_enabled = user_input.get(CONF_LOCKOUT_ENABLED, self._lockout_enabled)
+            default_trigger = user_input.get(CONF_LOCKOUT_TRIGGER_ENTITY)
             default_states = user_input.get(CONF_LOCKOUT_TARGET_STATES, [])
             default_participating = user_input.get(
                 CONF_LOCKOUT_PARTICIPATING_LOCKS, list(self._lock_entities)
             )
         else:
             default_enabled = self._lockout_enabled
+            default_trigger = self._lockout_trigger_entity
             default_states = self._lockout_target_states or []
             default_participating = (
                 self._lockout_participating_locks or list(self._lock_entities)
@@ -756,7 +1122,10 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_LOCKOUT_ENABLED, default=default_enabled
                 ): BooleanSelector(),
-                vol.Optional(CONF_LOCKOUT_TRIGGER_ENTITY): EntitySelector(
+                vol.Optional(
+                    CONF_LOCKOUT_TRIGGER_ENTITY,
+                    description={"suggested_value": default_trigger},
+                ): EntitySelector(
                     EntitySelectorConfig()
                 ),
                 vol.Optional(
@@ -821,7 +1190,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors["secure_password_confirm"] = "password_mismatch"
                 else:
                     self._secure_mode = True
-                    # Password will be hashed/stored during entry setup
+                    self._secure_password = password
                     return await self.async_step_confirm()
             elif has_password_data:
                 # Secure mode OFF but password fields not empty — user
@@ -926,12 +1295,509 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_LOCKOUT_PARTICIPATING_LOCKS: self._lockout_participating_locks,
         }
 
+        # Hash password and generate encryption salt when secure mode is on.
+        if self._secure_mode and self._secure_password:
+            from .crypto import hash_password as _hash_pw  # noqa: E402
+
+            data[CONF_SECURE_PASSWORD_HASH] = _hash_pw(self._secure_password)
+            data[CONF_SECURE_ENCRYPTION_SALT] = b64encode(
+                os.urandom(16)
+            ).decode("ascii")
+
+        # Include seed data if the user chose to seed from a lock.
+        if self._seed_slots:
+            data["seed_slots"] = self._seed_slots
+
         _LOGGER.info(
-            "Creating SlotSentry config entry: %d locks, %d slots, mode=%s, lockout=%s",
+            "Creating SlotSentry config entry: %d locks, %d slots, mode=%s, "
+            "lockout=%s, seed_slots=%d",
             len(self._lock_entities),
             self._slot_count,
             self._code_length_mode,
             self._lockout_enabled,
+            len(self._seed_slots),
         )
 
         return self.async_create_entry(title="SlotSentry", data=data)
+
+    # ==================================================================
+    # Reconfigure flow — modify existing entry (safe settings only)
+    # ==================================================================
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Entry point for the reconfigure flow.
+
+        Allows changing: lock selection, lockout config, secure mode.
+        Does NOT allow changing: code lengths, slot count (too destructive).
+
+        Routes through: reconfig_locks → reconfig_lockout → reconfig_secure
+        → applies changes to the existing entry.
+        """
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if entry is None:
+            return self.async_abort(reason="reconfigure_failed")
+
+        # Pre-populate flow state from the existing entry.
+        self._lock_entities = list(entry.data.get(CONF_LOCK_ENTITIES, []))
+        self._slot_count = int(entry.data.get(CONF_SLOT_COUNT, 0))
+        self._code_length_mode = str(
+            entry.data.get(CONF_CODE_LENGTH_MODE, CODE_LENGTH_SINGLE)
+        )
+        self._code_length_single = int(
+            entry.data.get(CONF_CODE_LENGTH_SINGLE, DEFAULT_CODE_LENGTH_SINGLE)
+        )
+        self._code_length_short = int(
+            entry.data.get(CONF_CODE_LENGTH_SHORT, DEFAULT_CODE_LENGTH_SHORT)
+        )
+        self._code_length_long = int(
+            entry.data.get(CONF_CODE_LENGTH_LONG, DEFAULT_CODE_LENGTH_LONG)
+        )
+        self._lockout_enabled = bool(entry.data.get(CONF_LOCKOUT_ENABLED, False))
+        self._lockout_trigger_entity = entry.data.get(CONF_LOCKOUT_TRIGGER_ENTITY)
+        self._lockout_target_states = list(
+            entry.data.get(CONF_LOCKOUT_TARGET_STATES, [])
+        )
+        self._lockout_participating_locks = list(
+            entry.data.get(CONF_LOCKOUT_PARTICIPATING_LOCKS, [])
+        )
+        self._secure_mode = bool(entry.data.get(CONF_SECURE_MODE, False))
+
+        # Snapshot originals so the confirm step can compute a diff.
+        self._orig_lock_entities = list(self._lock_entities)
+        self._orig_slot_count = self._slot_count
+        self._orig_lockout_enabled = self._lockout_enabled
+        self._orig_lockout_trigger_entity = self._lockout_trigger_entity
+        self._orig_lockout_target_states = list(self._lockout_target_states)
+        self._orig_lockout_participating_locks = list(
+            self._lockout_participating_locks
+        )
+        self._orig_secure_mode = self._secure_mode
+
+        return await self.async_step_reconfig_locks()
+
+    # ------------------------------------------------------------------
+    # Reconfig Step 1: Lock Selection (add/remove locks)
+    # ------------------------------------------------------------------
+
+    async def async_step_reconfig_locks(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Let the user add or remove locks from the managed set."""
+        if not self._available_locks:
+            raw_locks = _discover_zwave_locks(self.hass)
+            if not raw_locks:
+                return self.async_abort(reason="no_zwave_locks")
+            self._available_locks = await _async_discover_lock_capabilities(
+                self.hass, raw_locks
+            )
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected: list[str] = user_input.get(CONF_LOCK_ENTITIES, [])
+            if not selected:
+                errors[CONF_LOCK_ENTITIES] = "no_locks_selected"
+            else:
+                self._lock_entities = selected
+
+                # Recompute slot count from selected locks.
+                slot_counts = [
+                    lock["slots"]
+                    for lock in self._available_locks
+                    if lock["entity_id"] in selected and lock.get("slots")
+                ]
+                if slot_counts:
+                    new_slot_count = min(slot_counts)
+                    # Only increase slot count, never decrease (would lose data).
+                    if new_slot_count > self._slot_count:
+                        self._slot_count = new_slot_count
+                        _LOGGER.info(
+                            "Reconfigure: slot count increased to %d",
+                            self._slot_count,
+                        )
+
+                return await self.async_step_reconfig_lockout()
+
+        lock_options = _build_lock_options(self._available_locks)
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_LOCK_ENTITIES, default=self._lock_entities
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=lock_options,
+                        multiple=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="reconfig_locks",
+            data_schema=schema,
+            errors=errors,
+            last_step=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Reconfig Step 2: Keypad Lockout
+    # ------------------------------------------------------------------
+
+    async def async_step_reconfig_lockout(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Reconfigure keypad lockout settings.
+
+        Reuses the same validation logic as the initial lockout step.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            enabled: bool = user_input.get(CONF_LOCKOUT_ENABLED, False)
+            trigger_entity = user_input.get(CONF_LOCKOUT_TRIGGER_ENTITY)
+            target_states: list[str] = user_input.get(
+                CONF_LOCKOUT_TARGET_STATES, []
+            )
+            participating: list[str] = user_input.get(
+                CONF_LOCKOUT_PARTICIPATING_LOCKS, []
+            )
+
+            has_trigger = bool(trigger_entity)
+            has_states = bool(target_states)
+
+            if enabled:
+                if not has_trigger:
+                    errors[CONF_LOCKOUT_TRIGGER_ENTITY] = "no_lockout_trigger"
+                if not has_states:
+                    errors[CONF_LOCKOUT_TARGET_STATES] = "no_lockout_states"
+                if not participating:
+                    errors[CONF_LOCKOUT_PARTICIPATING_LOCKS] = "no_lockout_locks"
+                if errors:
+                    errors["base"] = "lockout_incomplete"
+                else:
+                    self._lockout_enabled = True
+                    self._lockout_trigger_entity = trigger_entity
+                    self._lockout_target_states = target_states
+                    self._lockout_participating_locks = participating
+                    return await self.async_step_reconfig_secure()
+            else:
+                self._lockout_enabled = False
+                self._lockout_trigger_entity = None
+                self._lockout_target_states = []
+                self._lockout_participating_locks = []
+                return await self.async_step_reconfig_secure()
+
+        # Build form — same structure as initial lockout step.
+        lock_labels: list[dict[str, Any]] = []
+        for eid in self._lock_entities:
+            name = _get_lock_name(self.hass, eid)
+            lock_labels.append({"entity_id": eid, "name": name})
+
+        participating_options = _build_lock_options_plain(lock_labels)
+        state_options: list[SelectOptionDict] = [
+            SelectOptionDict(value=s, label=s) for s in _LOCKOUT_STATE_SUGGESTIONS
+        ]
+
+        if user_input is not None:
+            default_enabled = user_input.get(CONF_LOCKOUT_ENABLED, self._lockout_enabled)
+            default_trigger = user_input.get(CONF_LOCKOUT_TRIGGER_ENTITY)
+            default_states = user_input.get(CONF_LOCKOUT_TARGET_STATES, [])
+            default_participating = user_input.get(
+                CONF_LOCKOUT_PARTICIPATING_LOCKS, list(self._lock_entities)
+            )
+        else:
+            default_enabled = self._lockout_enabled
+            default_trigger = self._lockout_trigger_entity
+            default_states = self._lockout_target_states or []
+            default_participating = (
+                self._lockout_participating_locks or list(self._lock_entities)
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_LOCKOUT_ENABLED, default=default_enabled
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_LOCKOUT_TRIGGER_ENTITY,
+                    description={"suggested_value": default_trigger},
+                ): EntitySelector(
+                    EntitySelectorConfig()
+                ),
+                vol.Optional(
+                    CONF_LOCKOUT_TARGET_STATES,
+                    default=default_states,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=state_options,
+                        multiple=True,
+                        custom_value=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_LOCKOUT_PARTICIPATING_LOCKS,
+                    default=default_participating,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=participating_options,
+                        multiple=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="reconfig_lockout",
+            data_schema=schema,
+            errors=errors,
+            last_step=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Reconfig Step 3: Secure Mode
+    # ------------------------------------------------------------------
+
+    async def async_step_reconfig_secure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Reconfigure secure mode settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            enabled = user_input.get(CONF_SECURE_MODE, False)
+            password = user_input.get("secure_password", "")
+            password_confirm = user_input.get("secure_password_confirm", "")
+            has_password_data = bool(password or password_confirm)
+
+            if enabled:
+                if not password:
+                    errors["secure_password"] = "password_required"
+                elif len(password) < MIN_PASSWORD_LENGTH:
+                    errors["secure_password"] = "password_too_short"
+                elif len(password) > MAX_PASSWORD_LENGTH:
+                    errors["secure_password"] = "password_too_long"
+                elif password != password_confirm:
+                    errors["secure_password_confirm"] = "password_mismatch"
+                else:
+                    self._secure_mode = True
+                    self._secure_password = password
+                    return await self.async_step_reconfig_confirm()
+            elif has_password_data:
+                errors["secure_password"] = "password_without_secure_mode"
+            else:
+                self._secure_mode = False
+                self._secure_password = ""
+                return await self.async_step_reconfig_confirm()
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SECURE_MODE, default=self._secure_mode
+                ): BooleanSelector(),
+                vol.Optional("secure_password", default=""): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Optional("secure_password_confirm", default=""): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="reconfig_secure",
+            data_schema=schema,
+            errors=errors,
+            last_step=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Reconfig Step 4: Review & Confirm (with warnings)
+    # ------------------------------------------------------------------
+
+    async def async_step_reconfig_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show a summary of what changed and warn about consequences."""
+        if user_input is not None:
+            return self._apply_reconfigure()
+
+        # --- Build change summary and warnings ---
+        changes: list[str] = []
+        warnings: list[str] = []
+
+        # Lock changes
+        orig_set = set(self._orig_lock_entities)
+        new_set = set(self._lock_entities)
+        added_locks = new_set - orig_set
+        removed_locks = orig_set - new_set
+
+        if added_locks:
+            added_names = [_get_lock_name(self.hass, e) for e in added_locks]
+            changes.append(f"Adding locks: {', '.join(added_names)}")
+            warnings.append(
+                "New locks will show all slots as out-of-sync until "
+                "you push codes to them."
+            )
+
+        if removed_locks:
+            removed_names = [_get_lock_name(self.hass, e) for e in removed_locks]
+            changes.append(f"Removing locks: {', '.join(removed_names)}")
+            warnings.append(
+                "Removed locks will keep their existing PIN codes on "
+                "the physical hardware. SlotSentry will stop managing "
+                "them, but codes already programmed will remain active."
+            )
+
+        if self._slot_count != self._orig_slot_count:
+            changes.append(
+                f"Slot count: {self._orig_slot_count} → {self._slot_count}"
+            )
+            if self._slot_count > self._orig_slot_count:
+                warnings.append(
+                    f"Slot count increased from {self._orig_slot_count} to "
+                    f"{self._slot_count}. New slots will be empty."
+                )
+
+        # Lockout changes
+        if self._lockout_enabled != self._orig_lockout_enabled:
+            if self._lockout_enabled:
+                changes.append("Keypad lockout: Disabled → Enabled")
+                warnings.append(
+                    "Keypads may lock immediately if the trigger entity "
+                    "is already in a target state."
+                )
+            else:
+                changes.append("Keypad lockout: Enabled → Disabled")
+                warnings.append(
+                    "All lock keypads will become active immediately, "
+                    "regardless of the former trigger entity state."
+                )
+        elif self._lockout_enabled:
+            # Lockout stayed enabled — check for sub-changes.
+            lockout_subchanges: list[str] = []
+            if self._lockout_trigger_entity != self._orig_lockout_trigger_entity:
+                lockout_subchanges.append("trigger entity changed")
+            if sorted(self._lockout_target_states) != sorted(
+                self._orig_lockout_target_states
+            ):
+                lockout_subchanges.append("target states changed")
+            if sorted(self._lockout_participating_locks) != sorted(
+                self._orig_lockout_participating_locks
+            ):
+                lockout_subchanges.append("participating locks changed")
+                removed_from_lockout = set(
+                    self._orig_lockout_participating_locks
+                ) - set(self._lockout_participating_locks)
+                if removed_from_lockout:
+                    rem_names = [
+                        _get_lock_name(self.hass, e)
+                        for e in removed_from_lockout
+                    ]
+                    warnings.append(
+                        f"Locks removed from lockout ({', '.join(rem_names)}) "
+                        "will have their keypads re-enabled."
+                    )
+            if lockout_subchanges:
+                changes.append(
+                    f"Keypad lockout updated: {', '.join(lockout_subchanges)}"
+                )
+
+        # Secure mode changes
+        if self._secure_mode != self._orig_secure_mode:
+            if self._secure_mode:
+                changes.append("Secure Mode: OFF → ON")
+                warnings.append(
+                    "PIN codes will be encrypted at rest. You will need "
+                    "your password to access the SlotSentry panel."
+                )
+            else:
+                changes.append("Secure Mode: ON → OFF")
+                warnings.append(
+                    "PIN codes will be stored in plain text. Anyone with "
+                    "access to the HA server can read them."
+                )
+
+        # Build the description string
+        if not changes:
+            summary = "No changes detected. Click Submit to keep the current configuration."
+        else:
+            change_lines = "\n".join(f"- {c}" for c in changes)
+            if warnings:
+                warning_lines = "\n".join(f"⚠ {w}" for w in warnings)
+                summary = (
+                    f"The following changes will be applied:\n\n"
+                    f"{change_lines}\n\n"
+                    f"Please review these warnings:\n\n"
+                    f"{warning_lines}"
+                )
+            else:
+                summary = (
+                    f"The following changes will be applied:\n\n"
+                    f"{change_lines}"
+                )
+
+        return self.async_show_form(
+            step_id="reconfig_confirm",
+            data_schema=vol.Schema({}),
+            last_step=True,
+            description_placeholders={"changes_summary": summary},
+        )
+
+    # ------------------------------------------------------------------
+    # Apply reconfigure changes
+    # ------------------------------------------------------------------
+
+    @callback
+    def _apply_reconfigure(self) -> ConfigFlowResult:
+        """Update the existing config entry with the reconfigured values."""
+        data: dict[str, Any] = {
+            CONF_LOCK_ENTITIES: self._lock_entities,
+            CONF_SLOT_COUNT: self._slot_count,
+            CONF_CODE_LENGTH_MODE: self._code_length_mode,
+            CONF_CODE_LENGTH_SINGLE: self._code_length_single,
+            CONF_CODE_LENGTH_SHORT: self._code_length_short,
+            CONF_CODE_LENGTH_LONG: self._code_length_long,
+            CONF_SECURE_MODE: self._secure_mode,
+            CONF_LOCKOUT_ENABLED: self._lockout_enabled,
+            CONF_LOCKOUT_TRIGGER_ENTITY: self._lockout_trigger_entity,
+            CONF_LOCKOUT_TARGET_STATES: self._lockout_target_states,
+            CONF_LOCKOUT_PARTICIPATING_LOCKS: self._lockout_participating_locks,
+        }
+
+        # Handle secure mode password hash and encryption salt.
+        entry = self._get_reconfigure_entry()
+        if self._secure_mode and self._secure_password:
+            # New password — hash it and generate a fresh encryption salt.
+            from .crypto import hash_password as _hash_pw  # noqa: E402
+
+            data[CONF_SECURE_PASSWORD_HASH] = _hash_pw(self._secure_password)
+            data[CONF_SECURE_ENCRYPTION_SALT] = b64encode(
+                os.urandom(16)
+            ).decode("ascii")
+        elif self._secure_mode:
+            # Secure mode stays on but password not changed — keep existing.
+            data[CONF_SECURE_PASSWORD_HASH] = entry.data.get(
+                CONF_SECURE_PASSWORD_HASH
+            )
+            data[CONF_SECURE_ENCRYPTION_SALT] = entry.data.get(
+                CONF_SECURE_ENCRYPTION_SALT
+            )
+        else:
+            # Secure mode off — clear password data.
+            data[CONF_SECURE_PASSWORD_HASH] = None
+            data[CONF_SECURE_ENCRYPTION_SALT] = None
+
+        _LOGGER.info(
+            "Reconfigure: updating entry with %d locks, lockout=%s, secure=%s",
+            len(self._lock_entities),
+            self._lockout_enabled,
+            self._secure_mode,
+        )
+
+        return self.async_update_reload_and_abort(entry, data=data)

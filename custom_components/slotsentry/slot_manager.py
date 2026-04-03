@@ -8,7 +8,7 @@ Owns all slot state, coordinates disk persistence via SlotSentryStore,
 delegates lock operations to LockCommitMachine instances, and fires HA
 events so sensor entities can reactively update.
 
-Revision: 1.2 — fix out-of-range code fallback; empty slots init as synced.
+Revision: 1.5 — secure mode encrypted save support.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from .const import (
     CONF_CODE_LENGTH_LONG,
     CONF_CODE_LENGTH_MODE,
     CONF_CODE_LENGTH_SHORT,
+    CONF_SECURE_MODE,
     CONF_SLOT_COUNT,
     EVENT_PUSH_STATUS_CHANGED,
     SYNC_OUT_OF_SYNC,
@@ -101,6 +102,11 @@ class SlotManager:
     # ------------------------------------------------------------------
 
     @property
+    def is_secure_mode(self) -> bool:
+        """True if secure mode is enabled on this entry."""
+        return bool(self._entry.data.get(CONF_SECURE_MODE, False))
+
+    @property
     def slot_count(self) -> int:
         """Number of configured slots (from config entry data)."""
         return int(self._entry.data.get(CONF_SLOT_COUNT, 0))
@@ -144,18 +150,23 @@ class SlotManager:
             if n not in existing_slots:
                 self._store.set_slot(SlotData.empty(n))
 
+        # Apply seed data from config flow (one-time, first setup only).
+        self._apply_seed_data()
+
         # Ensure every configured backend has commit entries for all slots.
         for lock_entity in self._backends:
             self._store.initialise_lock_commits(lock_entity, self.slot_count)
 
-        # On fresh setup, mark empty slots as synced (nothing to push).
+        # On fresh setup, mark empty slots as uncertain (never pushed).
+        # They transition to SYNC_SYNCED only after a successful push
+        # confirms the lock's actual state matches the integration.
         existing_slots = self._store.get_slots()
         for lock_entity in self._backends:
             for sn, slot in existing_slots.items():
                 if not slot.long_code and not slot.short_code and not slot.label:
                     commit = self._store.get_lock_commit(lock_entity, sn)
                     if commit.state == SYNC_OUT_OF_SYNC and commit.pushed_at is None:
-                        commit.state = SYNC_SYNCED
+                        commit.state = SYNC_UNCERTAIN
                         self._store.set_lock_commit(lock_entity, commit)
 
         # Create one LockCommitMachine per lock backend.
@@ -164,13 +175,50 @@ class SlotManager:
                 self._hass, backend, self._store, lock_entity,
             )
 
-        await self._store.async_save()
+        await self._async_save()
         _LOGGER.debug(
             "SlotManager loaded: %d slots, %d backends, %d commit machines",
             self.slot_count,
             len(self._backends),
             len(self._machines),
         )
+
+    async def _async_save(self) -> None:
+        """Save storage, using encrypted write if secure mode is active and unlocked."""
+        if self.is_secure_mode:
+            session = self._entry.runtime_data.secure_session
+            key = session.encryption_key
+            if key is not None:
+                await self._store.async_save_encrypted(key)
+                return
+            # If locked, codes in memory are still encrypted from load.
+            # Save as-is (they're already encrypted).
+        await self._store.async_save()
+
+    def decrypt_codes_in_memory(self, key: bytes) -> None:
+        """Decrypt all encrypted codes in the in-memory storage.
+
+        Called after a successful secure mode unlock so that the push
+        engine and slot accessors see plaintext codes.
+
+        Args:
+            key: 32-byte AES-256 encryption key.
+        """
+        if self._store.is_encrypted:
+            self._store.decrypt_codes(key)
+            _LOGGER.info("In-memory codes decrypted for secure session")
+
+    def encrypt_codes_in_memory(self, key: bytes) -> None:
+        """Re-encrypt all plaintext codes in memory.
+
+        Called when the user locks the secure session so that codes
+        are not held in plaintext in memory while the session is locked.
+
+        Args:
+            key: 32-byte AES-256 encryption key.
+        """
+        self._store.encrypt_codes(key)
+        _LOGGER.info("In-memory codes re-encrypted (session locked)")
 
     async def async_shutdown(self) -> None:
         """Cancel all running commit machines. Called during unload."""
@@ -254,7 +302,7 @@ class SlotManager:
 
         # -- Dirty detection: mark lock commits out_of_sync where needed -------
         self._mark_dirty_commits(slot_number, label, long_code, short_code)
-        await self._store.async_save()
+        await self._async_save()
 
         self._fire_push_status_event()
         _LOGGER.info("Slot %d updated (label=%r, enabled=%s)", slot_number, label, enabled)
@@ -266,7 +314,7 @@ class SlotManager:
             slot_number: 1-based slot index to delete.
         """
         self._store.delete_slot(slot_number)
-        await self._store.async_save()
+        await self._async_save()
         self._fire_push_status_event()
         _LOGGER.info("Slot %d deleted", slot_number)
 
@@ -390,6 +438,50 @@ class SlotManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _apply_seed_data(self) -> None:
+        """Populate storage slots from seed data in the config entry.
+
+        Seed data is a one-time payload set by the config flow when the user
+        chooses to pre-populate slots from an existing readable lock. After
+        processing, the seed_slots key is removed from the entry data.
+        """
+        seed_slots: list[dict] = self._entry.data.get("seed_slots", [])
+        if not seed_slots:
+            return
+
+        _LOGGER.info(
+            "Applying %d seed slot(s) from config flow", len(seed_slots)
+        )
+
+        for seed in seed_slots:
+            sn = seed.get("slot_number", 0)
+            if sn < 1 or sn > self.slot_count:
+                continue
+            slot = SlotData(
+                slot_number=sn,
+                label=seed.get("label", ""),
+                long_code=seed.get("long_code", ""),
+                short_code=seed.get("short_code", ""),
+                enabled=seed.get("enabled", True),
+                created_at="",
+                updated_at="",
+            )
+            self._store.set_slot(slot)
+            _LOGGER.debug(
+                "Seed: slot %d populated (long_code=%s, short_code=%s)",
+                sn,
+                "yes" if slot.long_code else "no",
+                "yes" if slot.short_code else "no",
+            )
+
+        # Remove seed_slots from entry data (one-time operation).
+        new_data = dict(self._entry.data)
+        new_data.pop("seed_slots", None)
+        self._hass.config_entries.async_update_entry(
+            self._entry, data=new_data
+        )
+        _LOGGER.info("Seed data applied and removed from config entry")
 
     def _select_code_for_backend(
         self, slot: SlotData, backend: LockBackend
