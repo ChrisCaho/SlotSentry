@@ -1,0 +1,11 @@
+{
+  "domain": "slotsentry",
+  "name": "SlotSentry",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["zwave_js"],
+  "documentation": "https://github.com/ChrisCaho/SlotSentry",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/ChrisCaho/SlotSentry/issues",
+  "version": "2026.4.0a8"
+}

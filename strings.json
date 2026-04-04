@@ -1,0 +1,138 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Welcome to SlotSentry",
+        "description": "SlotSentry gives you a single place to manage PIN codes across all your Z-Wave locks.\n\nThis wizard will discover your locks, configure code lengths, optionally set up a keypad lockout trigger, and choose whether to enable Secure Mode.",
+        "data": {}
+      },
+      "locks": {
+        "title": "Select Locks",
+        "description": "{discovery_notice}\n\nSelect the locks you want SlotSentry to manage. Slot count will be the smallest capacity among selected locks.\n\n* Required field",
+        "data": {
+          "lock_entities": "Locks to manage"
+        }
+      },
+      "slot_count": {
+        "title": "Slot Count",
+        "description": "SlotSentry could not auto-detect the number of code slots on your locks. Please enter the slot count manually. Check your lock documentation if unsure — most residential Z-Wave locks have 19 or 30 slots.\n\n* Required field",
+        "data": {
+          "slot_count": "Number of code slots"
+        }
+      },
+      "lock_code_lengths": {
+        "title": "Code Lengths Per Lock",
+        "description": "Select the PIN code length for each lock. If all locks use the same length, SlotSentry uses single-code mode. If you select two different lengths, dual-code mode is enabled automatically.\n\nMaximum of 2 distinct code lengths are supported.\n\n* Required field"
+      },
+      "seed": {
+        "title": "Seed From Existing Lock — Optional",
+        "description": "SlotSentry can read existing PIN codes from a lock and use them as a starting point. Only locks that support full code readback are shown below.\n\nSelect a lock to seed from, or leave as \"None\" to start with empty slots. Codes will be read and filled into sequential slot numbers, collapsing any gaps.",
+        "data": {
+          "seed_lock": "Seed slot data from lock",
+          "seed_lock_1": "Seed code 1 from lock",
+          "seed_lock_2": "Seed code 2 from lock"
+        }
+      },
+      "lockout": {
+        "title": "Keypad Lockout — Optional",
+        "description": "SlotSentry can disable lock keypads when a trigger entity reaches one or more target states (e.g. when your alarm is armed).\n\nSelect the trigger entity, then choose which states activate the lockout. You can select multiple states or type custom values.\n\nIf lockout is enabled, a trigger entity and at least one target state are required.",
+        "data": {
+          "lockout_enabled": "Enable keypad lockout",
+          "lockout_trigger_entity": "Lockout trigger entity",
+          "lockout_target_states": "Target states (lockout activates when entity matches any)",
+          "lockout_participating_locks": "Participating locks"
+        }
+      },
+      "secure_mode": {
+        "title": "Secure Mode — Optional",
+        "description": "When Secure Mode is enabled, all stored PIN codes are encrypted at rest using a password you choose. You will need this password every time you open the SlotSentry panel.\n\nIf you enable Secure Mode, enter and confirm your password below. Secure Mode can also be changed later via Reconfigure.",
+        "data": {
+          "secure_mode": "Enable Secure Mode",
+          "secure_password": "Password (8-16 characters)",
+          "secure_password_confirm": "Confirm password"
+        }
+      },
+      "confirm": {
+        "title": "Review & Confirm",
+        "description": "Locks ({lock_count}): {lock_list}\nSlots: {slot_count}\nCode Length: {code_length_mode} — {code_lengths}\nKeypad Lockout: {lockout_summary}\nSecure Mode: {secure_mode}\n\nClick Submit to finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
+      },
+      "reconfig_locks": {
+        "title": "Reconfigure — Lock Selection",
+        "description": "Add or remove locks from the managed set. Code lengths and slot count cannot be changed here — delete and re-add the integration to change those.\n\nSlot count will only increase if a newly added lock has more slots than the current count.",
+        "data": {
+          "lock_entities": "Locks to manage"
+        }
+      },
+      "reconfig_lockout": {
+        "title": "Reconfigure — Keypad Lockout",
+        "description": "Configure or disable keypad lockout. Enable the toggle and fill all fields to activate lockout, or leave the toggle off to disable it.",
+        "data": {
+          "lockout_enabled": "Enable keypad lockout",
+          "lockout_trigger_entity": "Lockout trigger entity",
+          "lockout_target_states": "Target states (lockout activates when entity matches any)",
+          "lockout_participating_locks": "Participating locks"
+        }
+      },
+      "reconfig_secure": {
+        "title": "Reconfigure — Secure Mode",
+        "description": "Enable or disable Secure Mode for PIN code encryption at rest. If enabling, enter and confirm your password below.",
+        "data": {
+          "secure_mode": "Enable Secure Mode",
+          "secure_password": "Password (8-16 characters)",
+          "secure_password_confirm": "Confirm password"
+        }
+      },
+      "reconfig_confirm": {
+        "title": "Review Changes",
+        "description": "{changes_summary}\n\nClick Submit to apply these changes. The integration will reload automatically."
+      }
+    },
+    "abort": {
+      "no_zwave_locks": "No Z-Wave lock entities found. Ensure Z-Wave JS is configured and locks are paired.",
+      "already_configured": "SlotSentry is already configured.",
+      "reconfigure_failed": "Could not find the existing configuration entry."
+    },
+    "error": {
+      "no_locks_selected": "At least one lock must be selected.",
+      "too_many_code_lengths": "Maximum of 2 distinct code lengths are supported. Please adjust your selections.",
+      "no_lockout_locks": "At least one lock must participate in lockout.",
+      "lockout_incomplete": "Lockout configuration is incomplete. Either enable the toggle and fill all fields, or disable the toggle and clear the trigger/state selections.",
+      "no_lockout_states": "Select at least one target state when lockout is enabled.",
+      "no_lockout_trigger": "Select a trigger entity when lockout is enabled.",
+      "duplicate_label": "Slot labels must be unique.",
+      "password_without_secure_mode": "Password fields must be empty when Secure Mode is off. Clear them or enable Secure Mode.",
+      "password_required": "Password is required when Secure Mode is enabled.",
+      "password_mismatch": "Passwords do not match.",
+      "password_too_short": "Password must be at least 8 characters.",
+      "password_too_long": "Password must be at most 16 characters."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "sync_status": {
+        "name": "Lock sync status"
+      },
+      "overall_status": {
+        "name": "Overall sync status"
+      }
+    },
+    "binary_sensor": {
+      "keypad_lockout": {
+        "name": "Keypad lockout"
+      }
+    },
+    "button": {
+      "push_all": {
+        "name": "Push all codes"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Reconfigure SlotSentry",
+        "description": "Modify your SlotSentry configuration."
+      }
+    }
+  }
+}

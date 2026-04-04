@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1E40AF"/>
+    </linearGradient>
+    <linearGradient id="visorGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#60A5FA"/>
+      <stop offset="100%" stop-color="#2563EB"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Shield body (sentry shape) -->
+  <path d="M128 16 L220 56 L220 140 C220 190 180 230 128 244 C76 230 36 190 36 140 L36 56 Z"
+        fill="url(#shieldGrad)" stroke="#1E3A8A" stroke-width="4"/>
+
+  <!-- Inner shield highlight -->
+  <path d="M128 32 L204 64 L204 138 C204 182 170 216 128 228 C86 216 52 182 52 138 L52 64 Z"
+        fill="none" stroke="#93C5FD" stroke-width="1.5" opacity="0.5"/>
+
+  <!-- Sentry visor / eye slit -->
+  <rect x="72" y="80" width="112" height="28" rx="14"
+        fill="url(#visorGrad)" stroke="#1E3A8A" stroke-width="2"/>
+
+  <!-- Visor glow dots (eyes) -->
+  <circle cx="100" cy="94" r="6" fill="#BFDBFE" opacity="0.9"/>
+  <circle cx="156" cy="94" r="6" fill="#BFDBFE" opacity="0.9"/>
+
+  <!-- Vertical slot lines on shield (code slot motif) -->
+  <line x1="88" y1="124" x2="88" y2="172" stroke="#93C5FD" stroke-width="3" opacity="0.4" stroke-linecap="round"/>
+  <line x1="108" y1="124" x2="108" y2="180" stroke="#93C5FD" stroke-width="3" opacity="0.4" stroke-linecap="round"/>
+  <line x1="128" y1="124" x2="128" y2="184" stroke="#93C5FD" stroke-width="3" opacity="0.5" stroke-linecap="round"/>
+  <line x1="148" y1="124" x2="148" y2="180" stroke="#93C5FD" stroke-width="3" opacity="0.4" stroke-linecap="round"/>
+  <line x1="168" y1="124" x2="168" y2="172" stroke="#93C5FD" stroke-width="3" opacity="0.4" stroke-linecap="round"/>
+
+  <!-- Small lock in bottom-right corner -->
+  <g transform="translate(186, 186)">
+    <!-- Lock body -->
+    <rect x="0" y="16" width="40" height="32" rx="4"
+          fill="#F59E0B" stroke="#92400E" stroke-width="2"/>
+    <!-- Lock shackle -->
+    <path d="M8 16 L8 8 C8 -2 32 -2 32 8 L32 16"
+          fill="none" stroke="#92400E" stroke-width="3" stroke-linecap="round"/>
+    <!-- Keyhole -->
+    <circle cx="20" cy="30" r="5" fill="#92400E"/>
+    <rect x="18" y="30" width="4" height="10" rx="1" fill="#92400E"/>
+  </g>
+</svg>
