@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from base64 import b64encode
 from typing import Any
 
@@ -60,6 +61,7 @@ from .const import (
     MAX_SLOTS,
     MIN_CODE_LENGTH,
     MIN_PASSWORD_LENGTH,
+    VERSION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,6 +86,7 @@ _LOCKOUT_STATE_SUGGESTIONS: list[str] = [
 
 def _discover_zwave_locks(hass: HomeAssistant) -> list[dict[str, Any]]:
     """Return all lock entities whose platform is zwave_js."""
+    t0 = time.monotonic()
     registry = er.async_get(hass)
     locks: list[dict[str, Any]] = []
     for entry in registry.entities.values():
@@ -96,6 +99,11 @@ def _discover_zwave_locks(hass: HomeAssistant) -> list[dict[str, Any]]:
                     "code_length": None,
                 }
             )
+    elapsed = time.monotonic() - t0
+    _LOGGER.info(
+        "PERF _discover_zwave_locks: found %d lock(s) in %.3fs",
+        len(locks), elapsed,
+    )
     return locks
 
 
@@ -108,24 +116,37 @@ async def _async_discover_lock_capabilities(
     Uses the Z-Wave User Code CC and searches for pin-length number entities
     on the same device.
     """
+    t_total = time.monotonic()
     registry = er.async_get(hass)
 
     for lock in locks:
         eid = lock["entity_id"]
+        t_lock = time.monotonic()
 
         # --- Slot count via User Code CC ---
+        t0 = time.monotonic()
         lock["slots"] = await _async_get_max_user_codes(hass, eid)
+        _LOGGER.info(
+            "PERF %s: _async_get_max_user_codes took %.3fs (slots=%s)",
+            eid, time.monotonic() - t0, lock["slots"],
+        )
 
         # --- Code length: try state attributes first ---
+        t0 = time.monotonic()
         code_len: int | None = None
         state = hass.states.get(eid)
         if state:
             min_len = state.attributes.get("usercode_min_length")
             if isinstance(min_len, int):
                 code_len = min_len
+                _LOGGER.info(
+                    "PERF %s: code_length from state attributes: %d (%.3fs)",
+                    eid, code_len, time.monotonic() - t0,
+                )
 
         # Fallback: find a number.*pin_length entity on the same device.
         if code_len is None:
+            t1 = time.monotonic()
             lock_entry = registry.async_get(eid)
             if lock_entry and lock_entry.device_id:
                 for ent in registry.entities.values():
@@ -144,14 +165,21 @@ async def _async_discover_lock_capabilities(
                             except (ValueError, TypeError):
                                 pass
                             break
+            _LOGGER.info(
+                "PERF %s: code_length pin_length entity scan: %s (%.3fs)",
+                eid, code_len, time.monotonic() - t1,
+            )
 
         lock["code_length"] = code_len
-        _LOGGER.debug(
-            "Lock %s: slots=%s, code_length=%s",
-            eid,
-            lock["slots"],
-            lock["code_length"],
+        _LOGGER.info(
+            "PERF %s: total lock discovery took %.3fs (slots=%s, code_length=%s)",
+            eid, time.monotonic() - t_lock, lock["slots"], lock["code_length"],
         )
+
+    _LOGGER.info(
+        "PERF _async_discover_lock_capabilities: %d lock(s) total %.3fs",
+        len(locks), time.monotonic() - t_total,
+    )
     return locks
 
 
@@ -196,7 +224,9 @@ async def _async_get_max_user_codes(
       3. Returns None so the config flow can ask the user.
     """
     # -- Approach 1: getUsersCount via CC API (with retry) --
+    t_approach1 = time.monotonic()
     for attempt in range(2):
+        t_attempt = time.monotonic()
         try:
             response = await hass.services.async_call(
                 "zwave_js",
@@ -211,14 +241,18 @@ async def _async_get_max_user_codes(
                 blocking=True,
                 return_response=True,
             )
+            _LOGGER.info(
+                "PERF %s: getUsersCount CC API call attempt %d took %.3fs",
+                entity_id, attempt + 1, time.monotonic() - t_attempt,
+            )
             if isinstance(response, dict):
                 payload = response.get(entity_id, response)
                 # getUsersCount returns a plain integer.
                 if isinstance(payload, int) and payload > 0:
                     capped = min(payload, MAX_SLOTS)
                     _LOGGER.info(
-                        "getUsersCount reports %d slots for %s",
-                        capped, entity_id,
+                        "PERF %s: getUsersCount success in %.3fs total (approach 1)",
+                        entity_id, time.monotonic() - t_approach1,
                     )
                     return capped
                 # Some versions may wrap in a dict.
@@ -249,11 +283,17 @@ async def _async_get_max_user_codes(
         if attempt == 0:
             await asyncio.sleep(2)
 
+    _LOGGER.info(
+        "PERF %s: approach 1 (getUsersCount) failed after %.3fs, trying approach 2",
+        entity_id, time.monotonic() - t_approach1,
+    )
+
     # -- Approach 2: scan cached userIdStatus values (gap-tolerant) --
     # Instead of stopping at the first missing slot, scan up to a
     # reasonable max and find the highest slot number present. This
     # handles incomplete Z-Wave node interviews that leave gaps.
     _SCAN_LIMIT = 50  # well above any residential lock capacity
+    t_approach2 = time.monotonic()
     try:
         from homeassistant.components.zwave_js.helpers import (
             async_get_node_from_entity_id,
@@ -276,16 +316,20 @@ async def _async_get_max_user_codes(
         if max_found > 0:
             capped = min(max_found, MAX_SLOTS)
             _LOGGER.info(
-                "Node value scan found highest slot %d for %s "
+                "PERF %s: node value scan found highest slot %d in %.3fs "
                 "(scanned 1–%d)",
-                capped,
-                entity_id,
-                _SCAN_LIMIT,
+                entity_id, capped, time.monotonic() - t_approach2, _SCAN_LIMIT,
             )
             return capped
+        _LOGGER.info(
+            "PERF %s: node value scan found no slots in %.3fs",
+            entity_id, time.monotonic() - t_approach2,
+        )
     except Exception:  # noqa: BLE001
         _LOGGER.warning(
-            "Node value scan failed for %s", entity_id, exc_info=True,
+            "PERF %s: node value scan failed after %.3fs",
+            entity_id, time.monotonic() - t_approach2,
+            exc_info=True,
         )
 
     _LOGGER.warning(
@@ -494,6 +538,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema({}),
             last_step=False,
+            description_placeholders={"version": VERSION},
         )
 
     # ------------------------------------------------------------------
@@ -510,11 +555,21 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         """
         # Discover and probe all locks on first visit (or re-entry).
         if not self._available_locks:
+            t_discovery = time.monotonic()
+            _LOGGER.info("PERF: Starting full lock discovery...")
             raw_locks = _discover_zwave_locks(self.hass)
             if not raw_locks:
+                _LOGGER.info(
+                    "PERF: No Z-Wave locks found (%.3fs)",
+                    time.monotonic() - t_discovery,
+                )
                 return self.async_abort(reason="no_zwave_locks")
             self._available_locks = await _async_discover_lock_capabilities(
                 self.hass, raw_locks
+            )
+            _LOGGER.info(
+                "PERF: Full lock discovery complete: %d locks in %.3fs",
+                len(self._available_locks), time.monotonic() - t_discovery,
             )
 
         errors: dict[str, str] = {}

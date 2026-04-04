@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Welcome to SlotSentry",
-        "description": "SlotSentry gives you a single place to manage PIN codes across all your Z-Wave locks.\n\nThis wizard will discover your locks, configure code lengths, optionally set up a keypad lockout trigger, and choose whether to enable Secure Mode.",
+        "description": "Version {version}\n\nSlotSentry gives you a single place to manage PIN codes across all your Z-Wave locks.\n\nThis wizard will discover your locks, configure code lengths, optionally set up a keypad lockout trigger, and choose whether to enable Secure Mode.",
         "data": {}
       },
       "locks": {
