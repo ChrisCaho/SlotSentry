@@ -4,7 +4,7 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.6
+Revision: 1.7 — config entry migration v1→v2.
 """
 
 from __future__ import annotations
@@ -22,7 +22,20 @@ from homeassistant.components.frontend import (
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_LOCK_ENTITIES, CONF_SECURE_MODE, DOMAIN, PLATFORMS, VERSION
+from .const import (
+    CODE_LENGTH_DUAL,
+    CODE_LENGTH_SINGLE,
+    CONF_CODE_LENGTH_1,
+    CONF_CODE_LENGTH_2,
+    CONF_CODE_LENGTH_MODE,
+    CONF_LOCK_ENTITIES,
+    CONF_PER_LOCK_CODE_LENGTH,
+    CONF_SECURE_MODE,
+    DEFAULT_CODE_LENGTH,
+    DOMAIN,
+    PLATFORMS,
+    VERSION,
+)
 from .crypto import SecureSession
 from .lock_backend import ZWaveJSBackend
 from .slot_manager import SlotManager
@@ -46,6 +59,68 @@ class SlotSentryData:
 
 
 type SlotSentryConfigEntry = ConfigEntry[SlotSentryData]
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant, config_entry: SlotSentryConfigEntry,
+) -> bool:
+    """Migrate config entry from an older version to the current version.
+
+    v1 → v2: Rename code_length_single/short/long to code_length_1/2,
+    build per_lock_code_length mapping from existing data.
+    """
+    if config_entry.version == 1:
+        _LOGGER.info("Migrating SlotSentry config entry from v1 to v2")
+        old_data = dict(config_entry.data)
+        new_data = dict(old_data)
+
+        # Extract old code length fields.
+        old_mode = old_data.get("code_length_mode", CODE_LENGTH_SINGLE)
+        old_single = old_data.get("code_length_single", DEFAULT_CODE_LENGTH)
+        old_short = old_data.get("code_length_short")
+        old_long = old_data.get("code_length_long")
+
+        # Remove old keys.
+        for key in ("code_length_single", "code_length_short", "code_length_long"):
+            new_data.pop(key, None)
+
+        # Compute new code_length_1 / code_length_2.
+        if old_mode == CODE_LENGTH_DUAL and old_short and old_long:
+            lengths = sorted([int(old_short), int(old_long)])
+            new_data[CONF_CODE_LENGTH_1] = lengths[0]
+            new_data[CONF_CODE_LENGTH_2] = lengths[1]
+            new_data[CONF_CODE_LENGTH_MODE] = CODE_LENGTH_DUAL
+        else:
+            new_data[CONF_CODE_LENGTH_1] = int(old_single) if old_single else DEFAULT_CODE_LENGTH
+            new_data[CONF_CODE_LENGTH_2] = None
+            new_data[CONF_CODE_LENGTH_MODE] = CODE_LENGTH_SINGLE
+
+        # Build per_lock_code_length mapping.
+        # For single mode, all locks get code_length_1.
+        # For dual mode, try to match each lock's discovered code length;
+        # fallback: assign code_length_1 to all.
+        lock_entities = new_data.get(CONF_LOCK_ENTITIES, [])
+        per_lock: dict[str, int] = {}
+        cl1 = new_data[CONF_CODE_LENGTH_1]
+        cl2 = new_data.get(CONF_CODE_LENGTH_2)
+
+        if new_data[CONF_CODE_LENGTH_MODE] == CODE_LENGTH_DUAL and cl2 is not None:
+            # During migration we don't have discovery data, so assign
+            # code_length_1 to all locks. Users can reconfigure later.
+            for eid in lock_entities:
+                per_lock[eid] = cl1
+        else:
+            for eid in lock_entities:
+                per_lock[eid] = cl1
+
+        new_data[CONF_PER_LOCK_CODE_LENGTH] = per_lock
+
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=2,
+        )
+        _LOGGER.info("SlotSentry config entry migrated to v2 successfully")
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SlotSentryConfigEntry) -> bool:

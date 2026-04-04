@@ -8,7 +8,7 @@ Owns all slot state, coordinates disk persistence via SlotSentryStore,
 delegates lock operations to LockCommitMachine instances, and fires HA
 events so sensor entities can reactively update.
 
-Revision: 1.5 — secure mode encrypted save support.
+Revision: 1.6 — per-lock code length, code_1/code_2 field names.
 """
 
 from __future__ import annotations
@@ -23,9 +23,10 @@ from .const import (
     ADDRESSING_NAME,
     CODE_LENGTH_DUAL,
     CODE_LENGTH_SINGLE,
-    CONF_CODE_LENGTH_LONG,
+    CONF_CODE_LENGTH_1,
+    CONF_CODE_LENGTH_2,
     CONF_CODE_LENGTH_MODE,
-    CONF_CODE_LENGTH_SHORT,
+    CONF_PER_LOCK_CODE_LENGTH,
     CONF_SECURE_MODE,
     CONF_SLOT_COUNT,
     EVENT_PUSH_STATUS_CHANGED,
@@ -119,16 +120,21 @@ class SlotManager:
         )
 
     @property
-    def short_length(self) -> int | None:
-        """Configured short code length, or None if single mode."""
-        val = self._entry.data.get(CONF_CODE_LENGTH_SHORT)
+    def code_length_1(self) -> int | None:
+        """Configured primary code length (shorter in dual mode)."""
+        val = self._entry.data.get(CONF_CODE_LENGTH_1)
         return int(val) if val is not None else None
 
     @property
-    def long_length(self) -> int | None:
-        """Configured long code length, or None if single mode."""
-        val = self._entry.data.get(CONF_CODE_LENGTH_LONG)
+    def code_length_2(self) -> int | None:
+        """Configured secondary code length (longer in dual mode), or None if single."""
+        val = self._entry.data.get(CONF_CODE_LENGTH_2)
         return int(val) if val is not None else None
+
+    @property
+    def per_lock_code_length(self) -> dict[str, int]:
+        """Mapping of lock entity_id → code length assigned to that lock."""
+        return dict(self._entry.data.get(CONF_PER_LOCK_CODE_LENGTH, {}))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -163,7 +169,7 @@ class SlotManager:
         existing_slots = self._store.get_slots()
         for lock_entity in self._backends:
             for sn, slot in existing_slots.items():
-                if not slot.long_code and not slot.short_code and not slot.label:
+                if not slot.code_1 and not slot.code_2 and not slot.label:
                     commit = self._store.get_lock_commit(lock_entity, sn)
                     if commit.state == SYNC_OUT_OF_SYNC and commit.pushed_at is None:
                         commit.state = SYNC_UNCERTAIN
@@ -238,8 +244,8 @@ class SlotManager:
         self,
         slot_number: int,
         label: str,
-        long_code: str,
-        short_code: str,
+        code_1: str,
+        code_2: str,
         enabled: bool,
     ) -> None:
         """Create or update a slot.
@@ -252,8 +258,8 @@ class SlotManager:
         Args:
             slot_number: 1-based slot index.
             label:       Human-readable name for this slot.
-            long_code:   The long PIN code (or empty string).
-            short_code:  The short PIN code (or empty string).
+            code_1:      The primary PIN code (or empty string).
+            code_2:      The secondary PIN code (or empty string).
             enabled:     Whether the slot is active.
 
         Raises:
@@ -277,14 +283,14 @@ class SlotManager:
         # -- Code length validation against backends ---------------------------
         for lock_entity, backend in self._backends.items():
             code_range = backend.supported_code_lengths
-            if long_code and not _code_in_range(long_code, code_range):
+            if code_1 and not _code_in_range(code_1, code_range):
                 raise ValueError(
-                    f"Long code length {len(long_code)} is outside the "
+                    f"Code 1 length {len(code_1)} is outside the "
                     f"supported range {code_range} for lock {lock_entity}"
                 )
-            if short_code and not _code_in_range(short_code, code_range):
+            if code_2 and not _code_in_range(code_2, code_range):
                 raise ValueError(
-                    f"Short code length {len(short_code)} is outside the "
+                    f"Code 2 length {len(code_2)} is outside the "
                     f"supported range {code_range} for lock {lock_entity}"
                 )
 
@@ -292,8 +298,8 @@ class SlotManager:
         slot = SlotData(
             slot_number=slot_number,
             label=label,
-            long_code=long_code,
-            short_code=short_code,
+            code_1=code_1,
+            code_2=code_2,
             enabled=enabled,
             created_at="",   # set_slot() handles timestamps
             updated_at="",
@@ -301,7 +307,7 @@ class SlotManager:
         self._store.set_slot(slot)
 
         # -- Dirty detection: mark lock commits out_of_sync where needed -------
-        self._mark_dirty_commits(slot_number, label, long_code, short_code)
+        self._mark_dirty_commits(slot_number, label, code_1, code_2)
         await self._async_save()
 
         self._fire_push_status_event()
@@ -335,11 +341,13 @@ class SlotManager:
 
         slots = self._store.get_slots()
         mode = self.code_length_mode
-        short = self.short_length
-        long = self.long_length
+        cl1 = self.code_length_1
+        cl2 = self.code_length_2
+        plcl = self.per_lock_code_length
 
-        for machine in self._machines.values():
-            await machine.async_start(slots, mode, short, long)
+        for lock_entity, machine in self._machines.items():
+            lock_cl = plcl.get(lock_entity)
+            await machine.async_start(slots, mode, cl1, cl2, lock_cl)
 
         # Wait for all machines to finish by awaiting their tasks.
         for machine in self._machines.values():
@@ -365,8 +373,10 @@ class SlotManager:
             raise KeyError(f"No backend configured for lock '{lock_entity}'")
 
         slots = self._store.get_slots()
+        lock_cl = self.per_lock_code_length.get(lock_entity)
         await machine.async_start(
-            slots, self.code_length_mode, self.short_length, self.long_length,
+            slots, self.code_length_mode, self.code_length_1, self.code_length_2,
+            lock_cl,
         )
 
         # Wait for completion.
@@ -461,18 +471,18 @@ class SlotManager:
             slot = SlotData(
                 slot_number=sn,
                 label=seed.get("label", ""),
-                long_code=seed.get("long_code", ""),
-                short_code=seed.get("short_code", ""),
+                code_1=seed.get("code_1", seed.get("long_code", "")),
+                code_2=seed.get("code_2", seed.get("short_code", "")),
                 enabled=seed.get("enabled", True),
                 created_at="",
                 updated_at="",
             )
             self._store.set_slot(slot)
             _LOGGER.debug(
-                "Seed: slot %d populated (long_code=%s, short_code=%s)",
+                "Seed: slot %d populated (code_1=%s, code_2=%s)",
                 sn,
-                "yes" if slot.long_code else "no",
-                "yes" if slot.short_code else "no",
+                "yes" if slot.code_1 else "no",
+                "yes" if slot.code_2 else "no",
             )
 
         # Remove seed_slots from entry data (one-time operation).
@@ -484,9 +494,9 @@ class SlotManager:
         _LOGGER.info("Seed data applied and removed from config entry")
 
     def _select_code_for_backend(
-        self, slot: SlotData, backend: LockBackend
+        self, slot: SlotData, backend: LockBackend, lock_entity: str,
     ) -> str | None:
-        """Choose which code to push to a backend based on code_length_mode.
+        """Choose which code to push to a backend based on per-lock code length.
 
         Used by ``_mark_dirty_commits`` for hash-based dirty detection.
         The actual push code selection is in LockCommitMachine.
@@ -498,15 +508,28 @@ class SlotManager:
         code_range = backend.supported_code_lengths
 
         if self.code_length_mode == CODE_LENGTH_SINGLE:
-            code = slot.long_code or slot.short_code
+            code = slot.code_1 or slot.code_2
             if code and _code_in_range(code, code_range):
                 return code
             return None
 
-        if slot.long_code and _code_in_range(slot.long_code, code_range):
-            return slot.long_code
-        if slot.short_code and _code_in_range(slot.short_code, code_range):
-            return slot.short_code
+        # Dual mode — use per-lock code length mapping to pick field.
+        lock_cl = self.per_lock_code_length.get(lock_entity)
+        cl1 = self.code_length_1
+        cl2 = self.code_length_2
+
+        if lock_cl is not None and cl1 is not None and lock_cl == cl1:
+            if slot.code_1 and _code_in_range(slot.code_1, code_range):
+                return slot.code_1
+        elif lock_cl is not None and cl2 is not None and lock_cl == cl2:
+            if slot.code_2 and _code_in_range(slot.code_2, code_range):
+                return slot.code_2
+        else:
+            # Fallback: try code_1 then code_2.
+            if slot.code_1 and _code_in_range(slot.code_1, code_range):
+                return slot.code_1
+            if slot.code_2 and _code_in_range(slot.code_2, code_range):
+                return slot.code_2
 
         return None
 
@@ -514,8 +537,8 @@ class SlotManager:
         self,
         slot_number: int,
         label: str,
-        long_code: str,
-        short_code: str,
+        code_1: str,
+        code_2: str,
     ) -> None:
         """Mark lock commits out_of_sync where the pushed code would change.
 
@@ -529,7 +552,7 @@ class SlotManager:
 
         for lock_entity, backend in self._backends.items():
             commit = self._store.get_lock_commit(lock_entity, slot_number)
-            code = self._select_code_for_backend(slot, backend)
+            code = self._select_code_for_backend(slot, backend, lock_entity)
 
             current_hash = hash_code(code) if code else None
             code_changed = current_hash != commit.code_hash

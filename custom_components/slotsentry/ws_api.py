@@ -16,7 +16,7 @@ Command overview:
   slotsentry/push_lock   — Push all dirty slots to one specific lock.
   slotsentry/get_status  — Return per-lock sync summary.
 
-Revision: 1.2 — secure mode: unlock/lock/secure_status, code masking when locked.
+Revision: 1.3 — code_1/code_2 field names, per-lock code length.
 """
 
 from __future__ import annotations
@@ -30,11 +30,11 @@ from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant
 
 from .const import (
-    CONF_CODE_LENGTH_LONG,
+    CONF_CODE_LENGTH_1,
+    CONF_CODE_LENGTH_2,
     CONF_CODE_LENGTH_MODE,
-    CONF_CODE_LENGTH_SHORT,
-    CONF_CODE_LENGTH_SINGLE,
     CONF_LOCK_ENTITIES,
+    CONF_PER_LOCK_CODE_LENGTH,
     CONF_LOCKOUT_ENABLED,
     CONF_LOCKOUT_PARTICIPATING_LOCKS,
     CONF_LOCKOUT_TARGET_STATES,
@@ -159,17 +159,17 @@ def _slot_data_to_dict(slot: Any, mask_codes: bool = False) -> dict[str, Any]:
         A JSON-serialisable dict suitable for sending to the frontend.
     """
     if mask_codes:
-        long_code = "****" if slot.long_code else ""
-        short_code = "****" if slot.short_code else ""
+        code_1 = "****" if slot.code_1 else ""
+        code_2 = "****" if slot.code_2 else ""
     else:
-        long_code = slot.long_code
-        short_code = slot.short_code
+        code_1 = slot.code_1
+        code_2 = slot.code_2
 
     return {
         "slot_number": slot.slot_number,
         "label": slot.label,
-        "long_code": long_code,
-        "short_code": short_code,
+        "code_1": code_1,
+        "code_2": code_2,
         "enabled": slot.enabled,
         "created_at": slot.created_at,
         "updated_at": slot.updated_at,
@@ -203,7 +203,7 @@ async def ws_get_slots(
 
     Response fields:
         slots (list[dict]): Ordered list of slot dicts, each containing
-            slot_number, label, long_code, short_code, enabled,
+            slot_number, label, code_1, code_2, enabled,
             created_at, updated_at.
         locked (bool): True if secure mode is active and codes are masked.
 
@@ -251,8 +251,8 @@ async def ws_get_slots(
         vol.Required("entry_id"): str,
         vol.Required("slot_number"): vol.All(int, vol.Range(min=1)),
         vol.Required("label"): str,
-        vol.Required("long_code"): str,
-        vol.Required("short_code"): str,
+        vol.Required("code_1"): str,
+        vol.Required("code_2"): str,
         vol.Required("enabled"): bool,
     }
 )
@@ -272,8 +272,8 @@ async def ws_set_slot(
         entry_id    (str):  The config entry ID.
         slot_number (int):  1-based slot index to write.
         label       (str):  Human-readable name for the slot.
-        long_code   (str):  The long PIN code, or empty string.
-        short_code  (str):  The short PIN code, or empty string.
+        code_1      (str):  The primary PIN code, or empty string.
+        code_2      (str):  The secondary PIN code, or empty string.
         enabled     (bool): Whether the slot is active.
 
     Response fields on success:
@@ -294,8 +294,8 @@ async def ws_set_slot(
         await slot_manager.async_set_slot(
             slot_number=msg["slot_number"],
             label=msg["label"],
-            long_code=msg["long_code"],
-            short_code=msg["short_code"],
+            code_1=msg["code_1"],
+            code_2=msg["code_2"],
             enabled=msg["enabled"],
         )
     except ValueError as exc:
@@ -585,9 +585,9 @@ async def ws_get_config(
     _SAFE_CONFIG_KEYS = {
         CONF_LOCK_ENTITIES,
         CONF_CODE_LENGTH_MODE,
-        CONF_CODE_LENGTH_SINGLE,
-        CONF_CODE_LENGTH_SHORT,
-        CONF_CODE_LENGTH_LONG,
+        CONF_CODE_LENGTH_1,
+        CONF_CODE_LENGTH_2,
+        CONF_PER_LOCK_CODE_LENGTH,
         CONF_SLOT_COUNT,
         CONF_SECURE_MODE,
         CONF_LOCKOUT_ENABLED,

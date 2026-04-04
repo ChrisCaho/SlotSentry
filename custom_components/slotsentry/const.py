@@ -4,27 +4,21 @@ Copyright (c) 2026 Chris Caho
 SPDX-License-Identifier: MIT
 Co-authored by Claude Code (Anthropic) under direction of Chris Caho.
 
-Revision: 1.2
+Revision: 1.3
 """
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a7"
+VERSION = "2026.4.0a8"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
-STORAGE_VERSION = 1
+STORAGE_VERSION = 2
 PLATFORMS = ["sensor", "binary_sensor", "button"]
 
 # Code length defaults and ranges
-DEFAULT_CODE_LENGTH_SINGLE = 6
-DEFAULT_CODE_LENGTH_SHORT = 4
-DEFAULT_CODE_LENGTH_LONG = 6
+DEFAULT_CODE_LENGTH = 6
 MIN_CODE_LENGTH = 4
 MAX_CODE_LENGTH = 8
-MIN_SHORT_CODE_LENGTH = 4
-MAX_SHORT_CODE_LENGTH = 7
-MIN_LONG_CODE_LENGTH = 5
-MAX_LONG_CODE_LENGTH = 8
 
 # Slot limits
 MAX_SLOTS = 250  # Upper bound sanity check; actual count from lock capabilities
@@ -81,9 +75,9 @@ ADDRESSING_NAME = "name"
 # Config entry keys
 CONF_LOCK_ENTITIES = "lock_entities"
 CONF_CODE_LENGTH_MODE = "code_length_mode"
-CONF_CODE_LENGTH_SINGLE = "code_length_single"
-CONF_CODE_LENGTH_SHORT = "code_length_short"
-CONF_CODE_LENGTH_LONG = "code_length_long"
+CONF_CODE_LENGTH_1 = "code_length_1"
+CONF_CODE_LENGTH_2 = "code_length_2"
+CONF_PER_LOCK_CODE_LENGTH = "per_lock_code_length"
 CONF_SLOT_COUNT = "slot_count"
 CONF_SECURE_MODE = "secure_mode"
 CONF_SECURE_PASSWORD_HASH = "secure_password_hash"

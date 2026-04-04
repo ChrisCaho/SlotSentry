@@ -14,7 +14,7 @@ State machine per (lock, slot):
                         ↓                     ↓
                       RETRY (≤ MAX_RETRIES) → FAILED
 
-Revision: 1.0
+Revision: 1.1 — per-lock code length, code_1/code_2 field names.
 """
 
 from __future__ import annotations
@@ -151,8 +151,9 @@ class LockCommitMachine:
         self,
         slots: dict[int, SlotData],
         code_length_mode: str,
-        short_length: int | None,
-        long_length: int | None,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None = None,
     ) -> None:
         """Wrap async_push_dirty_slots in an asyncio.Task and store it.
 
@@ -161,11 +162,13 @@ class LockCommitMachine:
         for this lock.
 
         Args:
-            slots:            All slot data for this config entry, keyed
-                              by slot number.
-            code_length_mode: ``CODE_LENGTH_SINGLE`` or ``CODE_LENGTH_DUAL``.
-            short_length:     Short code target length (dual mode only).
-            long_length:      Long code target length (dual mode only).
+            slots:             All slot data for this config entry, keyed
+                               by slot number.
+            code_length_mode:  ``CODE_LENGTH_SINGLE`` or ``CODE_LENGTH_DUAL``.
+            code_length_1:     Primary code length.
+            code_length_2:     Secondary code length (dual mode only).
+            lock_code_length:  The code length assigned to *this* lock
+                               (from per_lock_code_length mapping).
         """
         if self._task is not None and not self._task.done():
             _LOGGER.debug(
@@ -176,7 +179,8 @@ class LockCommitMachine:
 
         self._task = self._hass.async_create_task(
             self.async_push_dirty_slots(
-                slots, code_length_mode, short_length, long_length
+                slots, code_length_mode, code_length_1, code_length_2,
+                lock_code_length,
             ),
             name=f"slotsentry_push_{self._lock_entity}",
         )
@@ -260,8 +264,9 @@ class LockCommitMachine:
         self,
         slots: dict[int, SlotData],
         code_length_mode: str,
-        short_length: int | None,
-        long_length: int | None,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None = None,
     ) -> PushResult:
         """Push all dirty slots for this lock to the physical hardware.
 
@@ -273,10 +278,11 @@ class LockCommitMachine:
         All exceptions are caught internally; this coroutine never raises.
 
         Args:
-            slots:            All slot data for this config entry.
-            code_length_mode: ``CODE_LENGTH_SINGLE`` or ``CODE_LENGTH_DUAL``.
-            short_length:     Short code target length (dual mode).
-            long_length:      Long code target length (dual mode).
+            slots:             All slot data for this config entry.
+            code_length_mode:  ``CODE_LENGTH_SINGLE`` or ``CODE_LENGTH_DUAL``.
+            code_length_1:     Primary code length.
+            code_length_2:     Secondary code length (dual mode).
+            lock_code_length:  Code length assigned to this lock.
 
         Returns:
             PushResult summary for the whole lock.
@@ -330,7 +336,8 @@ class LockCommitMachine:
 
                 self._current_slot = slot_number
                 await self._push_slot_with_retry(
-                    slot, commit, code_length_mode, short_length, long_length, result
+                    slot, commit, code_length_mode, code_length_1, code_length_2,
+                    lock_code_length, result,
                 )
 
         except asyncio.CancelledError:
@@ -365,8 +372,9 @@ class LockCommitMachine:
         slot: SlotData,
         commit: LockSlotCommit,
         code_length_mode: str,
-        short_length: int | None,
-        long_length: int | None,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None,
         result: PushResult,
     ) -> None:
         """Push one slot, retrying on failure up to MAX_RETRIES times.
@@ -374,12 +382,13 @@ class LockCommitMachine:
         Updates storage commit state and PushResult in-place.
 
         Args:
-            slot:             The SlotData for this slot.
-            commit:           Current commit record from storage.
-            code_length_mode: Code length selection mode.
-            short_length:     Short code length.
-            long_length:      Long code length.
-            result:           Accumulator updated with success/failure counts.
+            slot:              The SlotData for this slot.
+            commit:            Current commit record from storage.
+            code_length_mode:  Code length selection mode.
+            code_length_1:     Primary code length.
+            code_length_2:     Secondary code length.
+            lock_code_length:  Code length for this lock.
+            result:            Accumulator updated with success/failure counts.
         """
         slot_number = slot.slot_number
 
@@ -396,7 +405,8 @@ class LockCommitMachine:
             )
 
             success, error_msg = await self._attempt_push(
-                slot, code_length_mode, short_length, long_length
+                slot, code_length_mode, code_length_1, code_length_2,
+                lock_code_length,
             )
 
             if success:
@@ -406,7 +416,8 @@ class LockCommitMachine:
                     state=SYNC_SYNCED,
                     pushed_at=_utcnow_iso(),
                     code_hash=self._compute_pushed_hash(
-                        slot, code_length_mode, short_length, long_length
+                        slot, code_length_mode, code_length_1, code_length_2,
+                        lock_code_length,
                     ),
                     last_pushed_label=slot.label if slot.label else None,
                 )
@@ -486,8 +497,9 @@ class LockCommitMachine:
         self,
         slot: SlotData,
         code_length_mode: str,
-        short_length: int | None,
-        long_length: int | None,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None = None,
     ) -> tuple[bool, str | None]:
         """Execute one push attempt for a slot.
 
@@ -495,10 +507,11 @@ class LockCommitMachine:
         verifies the write via readback.
 
         Args:
-            slot:             SlotData for the slot to push.
-            code_length_mode: Code length selection mode.
-            short_length:     Short code length (dual mode).
-            long_length:      Long code length (dual mode).
+            slot:              SlotData for the slot to push.
+            code_length_mode:  Code length selection mode.
+            code_length_1:     Primary code length.
+            code_length_2:     Secondary code length.
+            lock_code_length:  Code length assigned to this lock.
 
         Returns:
             A ``(success, error_message)`` tuple.  ``error_message`` is
@@ -528,19 +541,21 @@ class LockCommitMachine:
 
         # Set path: select code to push.
         code = self._select_code_for_lock(
-            slot, code_length_mode, short_length, long_length
+            slot, code_length_mode, code_length_1, code_length_2,
+            lock_code_length,
         )
         if code is None:
             # No compatible code for this lock — skip silently and treat as
             # "uncertain" so it will not be retried until something changes.
             _LOGGER.info(
                 "LockCommitMachine[%s]: slot %d has no compatible code for "
-                "this lock (mode=%s, short=%s, long=%s) — marking uncertain",
+                "this lock (mode=%s, cl1=%s, cl2=%s, lock_cl=%s) — marking uncertain",
                 self._lock_entity,
                 slot_number,
                 code_length_mode,
-                short_length,
-                long_length,
+                code_length_1,
+                code_length_2,
+                lock_code_length,
             )
             # Persist uncertain state immediately.
             uncertain_commit = LockSlotCommit(
@@ -665,21 +680,26 @@ class LockCommitMachine:
         self,
         slot: SlotData,
         code_length_mode: str,
-        short_length: int | None,
-        long_length: int | None,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None = None,
     ) -> str | None:
-        """Determine which code to push to this lock based on code lengths.
+        """Determine which code to push to this lock based on per-lock code length.
 
-        In DUAL mode, the long code is preferred if the lock supports its
-        length; otherwise the short code is tried. In SINGLE mode, the
-        slot's active code (long_code preferred, then short_code) is used
-        provided its length falls within the lock's supported range.
+        In DUAL mode, uses the lock_code_length to decide whether to push
+        code_1 or code_2. If lock_code_length matches code_length_1, push
+        code_1; if it matches code_length_2, push code_2. Fallback: try
+        code_1 then code_2.
+
+        In SINGLE mode, the slot's active code is used provided its length
+        falls within the lock's supported range.
 
         Args:
-            slot:             The SlotData whose codes are considered.
-            code_length_mode: ``CODE_LENGTH_SINGLE`` or ``CODE_LENGTH_DUAL``.
-            short_length:     Short code target length (may be None).
-            long_length:      Long code target length (may be None).
+            slot:              The SlotData whose codes are considered.
+            code_length_mode:  ``CODE_LENGTH_SINGLE`` or ``CODE_LENGTH_DUAL``.
+            code_length_1:     Primary code length (may be None).
+            code_length_2:     Secondary code length (may be None).
+            lock_code_length:  Code length assigned to this lock (may be None).
 
         Returns:
             The selected code string, or None if no compatible code exists
@@ -688,23 +708,20 @@ class LockCommitMachine:
         min_len, max_len = self._backend.supported_code_lengths
 
         if code_length_mode == CODE_LENGTH_DUAL:
-            # Try long code first.
-            if (
-                long_length is not None
-                and min_len <= long_length <= max_len
-                and slot.long_code
-                and len(slot.long_code) == long_length
-            ):
-                return slot.long_code
-            # Fall back to short code.
-            if (
-                short_length is not None
-                and min_len <= short_length <= max_len
-                and slot.short_code
-                and len(slot.short_code) == short_length
-            ):
-                return slot.short_code
-            # No matching code for this lock.
+            # Use per-lock code length to pick the right code field.
+            if lock_code_length is not None and code_length_1 is not None and lock_code_length == code_length_1:
+                if slot.code_1 and min_len <= len(slot.code_1) <= max_len:
+                    return slot.code_1
+                return None
+            if lock_code_length is not None and code_length_2 is not None and lock_code_length == code_length_2:
+                if slot.code_2 and min_len <= len(slot.code_2) <= max_len:
+                    return slot.code_2
+                return None
+            # Fallback: try code_1 then code_2.
+            if slot.code_1 and min_len <= len(slot.code_1) <= max_len:
+                return slot.code_1
+            if slot.code_2 and min_len <= len(slot.code_2) <= max_len:
+                return slot.code_2
             return None
 
         # Single mode — use whichever code is stored, provided its length
@@ -785,8 +802,9 @@ class LockCommitMachine:
         self,
         slot: SlotData,
         code_length_mode: str,
-        short_length: int | None,
-        long_length: int | None,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None = None,
     ) -> str | None:
         """Compute the hash of the code that was just pushed.
 
@@ -794,17 +812,19 @@ class LockCommitMachine:
         stored hash always reflects what was actually sent to the lock.
 
         Args:
-            slot:             The SlotData that was pushed.
-            code_length_mode: Code length selection mode used.
-            short_length:     Short code target length.
-            long_length:      Long code target length.
+            slot:              The SlotData that was pushed.
+            code_length_mode:  Code length selection mode used.
+            code_length_1:     Primary code length.
+            code_length_2:     Secondary code length.
+            lock_code_length:  Code length assigned to this lock.
 
         Returns:
             ``hash_code(selected_code)`` or None if no code was pushed
             (clear operation).
         """
         code = self._select_code_for_lock(
-            slot, code_length_mode, short_length, long_length
+            slot, code_length_mode, code_length_1, code_length_2,
+            lock_code_length,
         )
         if code is None:
             return None

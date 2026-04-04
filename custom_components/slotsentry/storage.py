@@ -8,9 +8,9 @@ Manages persistent JSON storage via HA's homeassistant.helpers.storage.Store,
 which provides atomic writes and built-in file locking.
 
 Storage file: .storage/slotsentry.<entry_id>
-Schema version: 1
+Schema version: 2
 
-Revision: 1.2 — secure mode encryption at rest for PIN codes.
+Revision: 1.3 — rename long_code/short_code to code_1/code_2.
 """
 
 from __future__ import annotations
@@ -74,8 +74,8 @@ class SlotData:
 
     slot_number: int
     label: str
-    long_code: str        # Empty string if not set
-    short_code: str       # Empty string if not set
+    code_1: str           # Primary code (empty string if not set)
+    code_2: str           # Secondary code (empty string if not set)
     enabled: bool
     created_at: str       # ISO 8601 timestamp; empty string if never written
     updated_at: str       # ISO 8601 timestamp; empty string if never written
@@ -85,19 +85,19 @@ class SlotData:
     # ------------------------------------------------------------------
 
     def is_empty(self) -> bool:
-        """Return True if neither long_code nor short_code is populated."""
-        return not self.long_code and not self.short_code
+        """Return True if neither code_1 nor code_2 is populated."""
+        return not self.code_1 and not self.code_2
 
     def get_active_code(self) -> str | None:
         """Return the code that should be pushed to a lock.
 
-        Prefers long_code; falls back to short_code.  Returns None when
+        Prefers code_1; falls back to code_2.  Returns None when
         the slot carries no code at all.
         """
-        if self.long_code:
-            return self.long_code
-        if self.short_code:
-            return self.short_code
+        if self.code_1:
+            return self.code_1
+        if self.code_2:
+            return self.code_2
         return None
 
     # ------------------------------------------------------------------
@@ -108,8 +108,8 @@ class SlotData:
         """Serialise to the storage JSON format (string keys, no slot_number)."""
         return {
             "label": self.label,
-            "long_code": self.long_code,
-            "short_code": self.short_code,
+            "code_1": self.code_1,
+            "code_2": self.code_2,
             "enabled": self.enabled,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -117,12 +117,16 @@ class SlotData:
 
     @classmethod
     def from_dict(cls, slot_number: int, data: dict[str, Any]) -> SlotData:
-        """Deserialise from a storage JSON dict, injecting the slot number."""
+        """Deserialise from a storage JSON dict, injecting the slot number.
+
+        Supports both v2 field names (code_1/code_2) and legacy v1 names
+        (long_code/short_code) for backward compatibility during migration.
+        """
         return cls(
             slot_number=slot_number,
             label=data.get("label", ""),
-            long_code=data.get("long_code", ""),
-            short_code=data.get("short_code", ""),
+            code_1=data.get("code_1", data.get("long_code", "")),
+            code_2=data.get("code_2", data.get("short_code", "")),
             enabled=data.get("enabled", False),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
@@ -134,8 +138,8 @@ class SlotData:
         return cls(
             slot_number=slot_number,
             label="",
-            long_code="",
-            short_code="",
+            code_1="",
+            code_2="",
             enabled=False,
             created_at="",
             updated_at="",
@@ -248,14 +252,14 @@ class SlotSentryStore:
     JSON schema::
 
         {
-            "version": 1,
+            "version": 2,
             "slot_count": 19,
             "code_length_mode": "dual",
             "slots": {
                 "1": {
                     "label": "",
-                    "long_code": "",
-                    "short_code": "",
+                    "code_1": "",
+                    "code_2": "",
                     "enabled": false,
                     "created_at": "",
                     "updated_at": ""
@@ -373,7 +377,7 @@ class SlotSentryStore:
     def decrypt_codes(self, key: bytes) -> None:
         """Decrypt all PIN codes in memory using the given AES key.
 
-        After this call, ``long_code`` and ``short_code`` fields in every
+        After this call, ``code_1`` and ``code_2`` fields in every
         slot contain plaintext values.  Safe to call on already-decrypted
         data (encrypted strings contain a ``:`` separator; digit-only
         strings are assumed to already be plaintext).
@@ -389,7 +393,7 @@ class SlotSentryStore:
         slots = self._data.get("slots", {})
         decrypted_count = 0
         for slot_key, slot_data in slots.items():
-            for code_field in ("long_code", "short_code"):
+            for code_field in ("code_1", "code_2"):
                 raw = slot_data.get(code_field, "")
                 if raw and ":" in raw:
                     # Looks like an encrypted value (nonce:ciphertext).
@@ -410,7 +414,7 @@ class SlotSentryStore:
     def encrypt_codes(self, key: bytes) -> None:
         """Encrypt all PIN codes in memory using the given AES key.
 
-        After this call, ``long_code`` and ``short_code`` fields contain
+        After this call, ``code_1`` and ``code_2`` fields contain
         AES-GCM encrypted values.  Safe to call on already-encrypted data.
 
         Args:
@@ -424,7 +428,7 @@ class SlotSentryStore:
         slots = self._data.get("slots", {})
         encrypted_count = 0
         for slot_key, slot_data in slots.items():
-            for code_field in ("long_code", "short_code"):
+            for code_field in ("code_1", "code_2"):
                 raw = slot_data.get(code_field, "")
                 if raw and ":" not in raw:
                     # Plaintext — encrypt it.
@@ -457,7 +461,7 @@ class SlotSentryStore:
         disk_data = copy.deepcopy(self._data)
         slots = disk_data.get("slots", {})
         for slot_data in slots.values():
-            for code_field in ("long_code", "short_code"):
+            for code_field in ("code_1", "code_2"):
                 raw = slot_data.get(code_field, "")
                 if raw and ":" not in raw:
                     slot_data[code_field] = encrypt_code(raw, key)
@@ -532,8 +536,8 @@ class SlotSentryStore:
 
         self._data["slots"][key] = {
             "label": slot.label,
-            "long_code": slot.long_code,
-            "short_code": slot.short_code,
+            "code_1": slot.code_1,
+            "code_2": slot.code_2,
             "enabled": slot.enabled,
             "created_at": created_at,
             "updated_at": now,
@@ -784,20 +788,24 @@ class SlotSentryStore:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
+        """Migrate storage schema v1 → v2: rename long_code/short_code to code_1/code_2."""
+        slots = data.get("slots", {})
+        for slot_key, slot_data in slots.items():
+            if "long_code" in slot_data:
+                slot_data["code_1"] = slot_data.pop("long_code")
+            if "short_code" in slot_data:
+                slot_data["code_2"] = slot_data.pop("short_code")
+            slot_data.setdefault("code_1", "")
+            slot_data.setdefault("code_2", "")
+        return data
+
+    @staticmethod
     def _migrate(data: dict[str, Any]) -> dict[str, Any]:
         """Apply schema migrations from the stored version to STORAGE_VERSION.
 
         Migrations are applied sequentially so that each step only needs
         to know about the immediately preceding version.
-
-        Currently at version 1 — migration is a no-op.  Future versions
-        follow the pattern::
-
-            while data["version"] < STORAGE_VERSION:
-                if data["version"] == 1:
-                    _LOGGER.info("Migrating SlotSentry storage v1 → v2")
-                    data = _migrate_v1_to_v2(data)
-                    data["version"] = 2
 
         Args:
             data: Raw dict loaded from disk.
@@ -820,20 +828,21 @@ class SlotSentryStore:
             )
             return data
 
-        # Future migrations go here, e.g.:
-        #
-        # while data["version"] < STORAGE_VERSION:
-        #     if data["version"] == 1:
-        #         _LOGGER.info("Migrating SlotSentry storage v1 → v2")
-        #         data = _migrate_v1_to_v2(data)
-        #         data["version"] = 2
+        while data.get("version", 0) < STORAGE_VERSION:
+            v = data.get("version", 0)
+            if v == 1:
+                _LOGGER.info("Migrating SlotSentry storage v1 → v2")
+                data = SlotSentryStore._migrate_v1_to_v2(data)
+                data["version"] = 2
+            else:
+                _LOGGER.warning(
+                    "SlotSentry storage version %d is unknown (expected %d); "
+                    "no migration applied.",
+                    v,
+                    STORAGE_VERSION,
+                )
+                break
 
-        _LOGGER.warning(
-            "SlotSentry storage version %d is unknown (expected %d); "
-            "no migration applied.",
-            stored_version,
-            STORAGE_VERSION,
-        )
         return data
 
     # ------------------------------------------------------------------
