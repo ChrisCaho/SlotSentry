@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a11
+ * Version: 2026.4.0a12
  * Revision: 2.3
  *
  * Copyright (c) 2026 Chris Caho
@@ -39,6 +39,7 @@ class SlotSentryPanel extends HTMLElement {
     this._savingSlots = {};
     this._deletingSlots = {};
     this._pushingLocks = {};
+    this._activePushLock = null;
     this._error = null;
     this._editValues = {};
     this._pushPollId = null;
@@ -425,19 +426,17 @@ class SlotSentryPanel extends HTMLElement {
 
     try {
       await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId });
-      this._toast("Push complete for all locks.", "success");
+      this._startPushPoll();
     } catch (err) {
-      this._toast("Push failed: " + (err.message || err), "error");
-    } finally {
       this._pushing = false;
       this._pushProgress = "";
-      await this._refresh();
+      this._toast("Push failed: " + (err.message || err), "error");
       this._scheduleRender();
     }
   }
 
   async _pushLock(lockEntity) {
-    if (this._pushingLocks[lockEntity]) return;
+    if (this._pushingLocks[lockEntity] || this._pushing) return;
     this._pushingLocks = { ...this._pushingLocks, [lockEntity]: true };
     this._scheduleRender();
 
@@ -447,16 +446,64 @@ class SlotSentryPanel extends HTMLElement {
         entry_id: this._entryId,
         lock_entity: lockEntity,
       });
-      this._toast("Push complete for " + this._lockDisplayName(lockEntity) + ".", "success");
+      this._startPushPoll();
     } catch (err) {
-      this._toast("Push failed: " + (err.message || err), "error");
-    } finally {
       const s = { ...this._pushingLocks };
       delete s[lockEntity];
       this._pushingLocks = s;
-      await this._refresh();
+      this._toast("Push failed: " + (err.message || err), "error");
       this._scheduleRender();
     }
+  }
+
+  _startPushPoll() {
+    if (this._pushPollId) return;
+    this._pushPollStart = Date.now();
+    this._pushPollId = setInterval(() => this._pollPushStatus(), 1500);
+    // Immediate first poll after a short delay for backend to start.
+    setTimeout(() => this._pollPushStatus(), 300);
+  }
+
+  _stopPushPoll() {
+    if (this._pushPollId) {
+      clearInterval(this._pushPollId);
+      this._pushPollId = null;
+    }
+  }
+
+  async _pollPushStatus() {
+    try {
+      const resp = await this._hass.callWS({
+        type: "slotsentry/get_status",
+        entry_id: this._entryId,
+      });
+      this._status = resp.status || {};
+      this._activePushLock = resp.active_push_lock || null;
+
+      if (!this._activePushLock) {
+        // Push finished — clean up.
+        this._stopPushPoll();
+        this._pushing = false;
+        this._pushProgress = "";
+        this._pushingLocks = {};
+        this._activePushLock = null;
+        await this._loadSlots();
+        this._toast("Push complete.", "success");
+      } else {
+        this._pushProgress = "Pushing to " + this._lockDisplayName(this._activePushLock) + "\u2026";
+      }
+    } catch (err) {
+      // Timeout safety — stop after 5 minutes.
+      if (Date.now() - this._pushPollStart > 300000) {
+        this._stopPushPoll();
+        this._pushing = false;
+        this._pushProgress = "";
+        this._pushingLocks = {};
+        this._activePushLock = null;
+        this._toast("Push status poll timed out.", "error");
+      }
+    }
+    this._scheduleRender();
   }
 
   _allLocksSynced() {
@@ -499,7 +546,7 @@ class SlotSentryPanel extends HTMLElement {
   }
 
   _overallStatusBadge() {
-    if (this._pushing) return { label: "Syncing\u2026", cls: "pushing" };
+    if (this._pushing || this._activePushLock) return { label: "Syncing\u2026", cls: "pushing" };
     const entries = Object.values(this._status);
     if (!entries.length) return { label: "No Locks", cls: "" };
     if (entries.every(s => s.state === "synced")) return { label: "All Synced", cls: "synced" };
@@ -582,7 +629,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a11";
+    const version = "v2026.4.0a12";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Error badge: only show if there are actual errors; make it clickable
@@ -610,8 +657,8 @@ class SlotSentryPanel extends HTMLElement {
         </div>
         <div class="header-actions">
           ${badgeHTML}
-          <button class="btn btn-primary" data-action="push-all" ${this._pushing || this._savingAll ? "disabled" : ""}>
-            ${this._pushing
+          <button class="btn btn-primary" data-action="push-all" ${this._pushing || this._savingAll || this._activePushLock ? "disabled" : ""}>
+            ${this._pushing || this._activePushLock
               ? '<div class="spinner-sm"></div> Pushing\u2026'
               : '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> Push Changes'}
           </button>
@@ -619,7 +666,7 @@ class SlotSentryPanel extends HTMLElement {
       </div>
 
       <div class="content">
-        ${this._pushing || this._savingAll ? '<div class="push-progress-bar"><div class="spinner-sm"></div><span>' + this._esc(this._pushProgress) + '</span></div>' : ''}
+        ${this._pushing || this._savingAll || this._activePushLock ? '<div class="push-progress-bar"><div class="spinner-sm"></div><span>' + this._esc(this._pushProgress) + '</span></div>' : ''}
 
         <p class="section-title">Slots (${this._slots.length})</p>
         ${this._renderSlotTableHTML()}
@@ -791,7 +838,7 @@ class SlotSentryPanel extends HTMLElement {
   _renderLockCardHTML(lockEntity, info) {
     const name = this._lockDisplayName(lockEntity);
     const state = info.state || "uncertain";
-    const pushing = !!this._pushingLocks[lockEntity];
+    const isActive = this._activePushLock === lockEntity;
 
     let dirtyCountHTML = "";
     let dirtyListHTML = "";
@@ -802,8 +849,13 @@ class SlotSentryPanel extends HTMLElement {
       dirtyListHTML = '<div class="dirty-slots">Pending: ' + this._esc(shown + extra) + '</div>';
     }
 
+    const overlayHTML = isActive
+      ? '<div class="lock-card-overlay"><div class="spinner"></div><span>Pushing\u2026</span></div>'
+      : "";
+
     return `
-      <div class="lock-card ${this._esc(state)}">
+      <div class="lock-card ${this._esc(state)} ${isActive ? "pushing-active" : ""}">
+        ${overlayHTML}
         <div class="lock-name">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="flex-shrink:0;opacity:0.7;">
             <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
@@ -821,10 +873,8 @@ class SlotSentryPanel extends HTMLElement {
         ${dirtyListHTML}
         <div class="lock-actions">
           <button class="btn btn-push-lock" data-action="push-lock" data-lock="${this._esc(lockEntity)}"
-            ${pushing || this._pushing ? "disabled" : ""}>
-            ${pushing
-              ? '<div class="spinner-xs"></div> Pushing\u2026'
-              : '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> Push Lock'}
+            ${isActive || this._pushing || this._activePushLock ? "disabled" : ""}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg> Push Lock
           </button>
         </div>
       </div>`;
@@ -1052,9 +1102,17 @@ class SlotSentryPanel extends HTMLElement {
         border: 1px solid var(--ss-border); padding: 14px;
         border-left: 4px solid var(--ss-uncertain);
       }
+      .lock-card { position: relative; overflow: hidden; }
       .lock-card.synced { border-left-color: var(--ss-success); }
       .lock-card.out_of_sync { border-left-color: var(--ss-warning); }
       .lock-card.error, .lock-card.failed { border-left-color: var(--ss-error); }
+      .lock-card.pushing-active { border-left-color: var(--ss-accent); }
+      .lock-card-overlay {
+        position: absolute; inset: 0; z-index: 2;
+        background: rgba(0,0,0,0.45); border-radius: var(--ss-radius);
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 8px; color: #fff; font-size: 13px; font-weight: 500;
+      }
 
       .lock-name { display: flex; align-items: center; gap: 8px; font-weight: 500; font-size: 14px; margin-bottom: 8px; }
       .lock-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -414,11 +414,12 @@ async def ws_push_all(
     if slot_manager is None:
         return
 
-    await slot_manager.async_push_all()
+    hass.async_create_task(slot_manager.async_push_all())
 
     connection.send_result(msg["id"], {"success": True})
     _LOGGER.debug(
-        "ws_push_all: push initiated for entry %s", msg["entry_id"]
+        "ws_push_all: push initiated (fire-and-forget) for entry %s",
+        msg["entry_id"],
     )
 
 
@@ -468,14 +469,12 @@ async def ws_push_lock(
 
     lock_entity: str = msg["lock_entity"]
 
-    try:
-        await slot_manager.async_push_lock(lock_entity=lock_entity)
-    except KeyError as exc:
+    # Validate the lock exists before firing the task.
+    if not slot_manager.has_lock(lock_entity):
         _LOGGER.info(
-            "ws_push_lock: lock '%s' not configured for entry %s: %s",
+            "ws_push_lock: lock '%s' not configured for entry %s",
             lock_entity,
             msg["entry_id"],
-            exc,
         )
         connection.send_error(
             msg["id"],
@@ -485,9 +484,13 @@ async def ws_push_lock(
         )
         return
 
+    hass.async_create_task(
+        slot_manager.async_push_lock(lock_entity=lock_entity)
+    )
+
     connection.send_result(msg["id"], {"success": True})
     _LOGGER.debug(
-        "ws_push_lock: push to '%s' initiated for entry %s",
+        "ws_push_lock: push to '%s' initiated (fire-and-forget) for entry %s",
         lock_entity,
         msg["entry_id"],
     )
@@ -535,7 +538,10 @@ async def ws_get_status(
 
     status = slot_manager.get_push_status()
 
-    connection.send_result(msg["id"], {"status": status})
+    connection.send_result(msg["id"], {
+        "status": status,
+        "active_push_lock": slot_manager.active_push_lock,
+    })
     _LOGGER.debug(
         "ws_get_status: returned status for %d lock(s) for entry %s",
         len(status),

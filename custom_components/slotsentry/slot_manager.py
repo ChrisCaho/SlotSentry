@@ -98,6 +98,9 @@ class SlotManager:
         # One commit machine per lock — created during async_load().
         self._machines: dict[str, LockCommitMachine] = {}
 
+        # Track which lock is currently being pushed (for panel spinner).
+        self._active_push_lock: str | None = None
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -135,6 +138,15 @@ class SlotManager:
     def per_lock_code_length(self) -> dict[str, int]:
         """Mapping of lock entity_id → code length assigned to that lock."""
         return dict(self._entry.data.get(CONF_PER_LOCK_CODE_LENGTH, {}))
+
+    @property
+    def active_push_lock(self) -> str | None:
+        """Entity ID of the lock currently being pushed, or None."""
+        return self._active_push_lock
+
+    def has_lock(self, lock_entity: str) -> bool:
+        """Return True if *lock_entity* is a configured backend."""
+        return lock_entity in self._machines
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -328,34 +340,39 @@ class SlotManager:
     # ------------------------------------------------------------------
 
     async def async_push_all(self) -> None:
-        """Push dirty slots to all configured locks via commit machines.
+        """Push dirty slots to all configured locks sequentially.
 
-        Starts each lock's LockCommitMachine in parallel. The machines
-        handle retry/backoff/verification internally. Fires a push-status
-        event when all machines have completed.
+        Locks are pushed one at a time to avoid Z-Wave network congestion.
+        Fires a push-status event after each lock completes so the panel
+        can update incrementally.
         """
         if not self._machines:
             _LOGGER.debug("async_push_all: no commit machines, nothing to push")
             return
 
-        slots = self._store.get_slots()
         mode = self.code_length_mode
         cl1 = self.code_length_1
         cl2 = self.code_length_2
         plcl = self.per_lock_code_length
 
         for lock_entity, machine in self._machines.items():
+            self._active_push_lock = lock_entity
+            self._fire_push_status_event()
+
+            slots = self._store.get_slots()
             lock_cl = plcl.get(lock_entity)
             await machine.async_start(slots, mode, cl1, cl2, lock_cl)
 
-        # Wait for all machines to finish by awaiting their tasks.
-        for machine in self._machines.values():
+            # Wait for this lock to finish before starting the next.
             if machine._task is not None and not machine._task.done():
                 try:
                     await machine._task
                 except Exception:  # noqa: BLE001
                     pass  # Errors are handled inside the machine.
 
+            self._fire_push_status_event()
+
+        self._active_push_lock = None
         self._fire_push_status_event()
 
     async def async_push_lock(self, lock_entity: str) -> None:
@@ -371,6 +388,9 @@ class SlotManager:
         if machine is None:
             raise KeyError(f"No backend configured for lock '{lock_entity}'")
 
+        self._active_push_lock = lock_entity
+        self._fire_push_status_event()
+
         slots = self._store.get_slots()
         lock_cl = self.per_lock_code_length.get(lock_entity)
         await machine.async_start(
@@ -385,6 +405,7 @@ class SlotManager:
             except Exception:  # noqa: BLE001
                 pass
 
+        self._active_push_lock = None
         self._fire_push_status_event()
 
     # ------------------------------------------------------------------
