@@ -444,6 +444,11 @@ class SlotManager:
                     synced += 1
                     continue
 
+                # Skip empty slots that were never pushed — nothing to clear.
+                if slot and slot.is_empty() and commit.pushed_at is None:
+                    synced += 1
+                    continue
+
                 if commit.state == SYNC_SYNCED:
                     synced += 1
                 elif commit.state == SYNC_OUT_OF_SYNC:

@@ -529,6 +529,17 @@ class LockCommitMachine:
             )
             return True, None
 
+        # Skip empty slots that have never been pushed — nothing on the lock
+        # to clear, so sending a clear command is wasteful.
+        commit = self._store.get_lock_commit(self._lock_entity, slot_number)
+        if slot.is_empty() and (commit is None or commit.pushed_at is None):
+            _LOGGER.debug(
+                "LockCommitMachine[%s]: slot %d is empty and never pushed — skipping",
+                self._lock_entity,
+                slot_number,
+            )
+            return True, None
+
         # Determine whether to set or clear.
         if slot.is_empty() or not slot.enabled:
             # Clear path: slot has no code, or is disabled but has data
