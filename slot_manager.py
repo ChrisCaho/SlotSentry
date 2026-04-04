@@ -471,8 +471,8 @@ class SlotManager:
             slot = SlotData(
                 slot_number=sn,
                 label=seed.get("label", ""),
-                code_1=seed.get("code_1", seed.get("long_code", "")),
-                code_2=seed.get("code_2", seed.get("short_code", "")),
+                code_1=seed.get("code_1", seed.get("short_code", "")),
+                code_2=seed.get("code_2", seed.get("long_code", "")),
                 enabled=seed.get("enabled", True),
                 created_at="",
                 updated_at="",

@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a4
+ * Version: 2026.4.0a10
  * Revision: 2.3
  *
  * Copyright (c) 2026 Chris Caho
@@ -103,11 +103,11 @@ class SlotSentryPanel extends HTMLElement {
   _modeSummary() {
     if (!this._config) return "";
     if (this._isDual) {
-      const l = this._config.code_length_long || "?";
-      const s = this._config.code_length_short || "?";
-      return "Long " + l + "-digit / Short " + s + "-digit";
+      const l = this._config.code_length_2 || "?";
+      const s = this._config.code_length_1 || "?";
+      return "Code 1: " + s + "-digit / Code 2: " + l + "-digit";
     }
-    const c = this._config.code_length_single || this._config.code_length_long || "?";
+    const c = this._config.code_length_1 || this._config.code_length_2 || "?";
     return c + "-digit";
   }
 
@@ -198,8 +198,8 @@ class SlotSentryPanel extends HTMLElement {
         if (!next[slot.slot_number]) {
           next[slot.slot_number] = {
             label: slot.label || "",
-            long_code: slot.long_code || "",
-            short_code: slot.short_code || "",
+            code_1: slot.code_1 || "",
+            code_2: slot.code_2 || "",
             enabled: slot.enabled ?? false,
           };
         }
@@ -239,8 +239,8 @@ class SlotSentryPanel extends HTMLElement {
         const vals = this._editValues[n];
         if (!vals) continue;
         if (vals.label !== (slot.label || "") ||
-            vals.long_code !== (slot.long_code || "") ||
-            vals.short_code !== (slot.short_code || "") ||
+            vals.code_1 !== (slot.code_1 || "") ||
+            vals.code_2 !== (slot.code_2 || "") ||
             vals.enabled !== (slot.enabled ?? false)) {
           this._dirty = true;
           break;
@@ -255,8 +255,8 @@ class SlotSentryPanel extends HTMLElement {
     const vals = this._editValues[n];
     if (!vals) return false;
     return vals.label !== (slot.label || "") ||
-      vals.long_code !== (slot.long_code || "") ||
-      vals.short_code !== (slot.short_code || "") ||
+      vals.code_1 !== (slot.code_1 || "") ||
+      vals.code_2 !== (slot.code_2 || "") ||
       vals.enabled !== (slot.enabled ?? false);
   }
 
@@ -291,8 +291,8 @@ class SlotSentryPanel extends HTMLElement {
         entry_id: this._entryId,
         slot_number: slotNumber,
         label: vals.label || "",
-        long_code: vals.long_code || "",
-        short_code: vals.short_code || "",
+        code_1: vals.code_1 || "",
+        code_2: vals.code_2 || "",
         enabled: !!vals.enabled,
       });
       this._toast("Slot " + slotNumber + " saved.", "success");
@@ -370,8 +370,8 @@ class SlotSentryPanel extends HTMLElement {
           entry_id: this._entryId,
           slot_number: s.slot_number,
           label: s.label || "",
-          long_code: s.long_code || "",
-          short_code: s.short_code || "",
+          code_1: s.code_1 || "",
+          code_2: s.code_2 || "",
           enabled: !!s.enabled,
         });
         saved++;
@@ -404,8 +404,8 @@ class SlotSentryPanel extends HTMLElement {
     for (const slot of this._slots) {
       this._editValues[slot.slot_number] = {
         label: slot.label || "",
-        long_code: slot.long_code || "",
-        short_code: slot.short_code || "",
+        code_1: slot.code_1 || "",
+        code_2: slot.code_2 || "",
         enabled: slot.enabled ?? false,
       };
     }
@@ -547,7 +547,7 @@ class SlotSentryPanel extends HTMLElement {
   }
 
   _isSlotEmpty(slot) {
-    return !slot.label && !slot.long_code && !slot.short_code;
+    return !slot.label && !slot.code_1 && !slot.code_2;
   }
 
   _isSlotDirtyOnLock(slotNumber) {
@@ -619,7 +619,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a4";
+    const version = "v2026.4.0a10";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Error badge: only show if there are actual errors; make it clickable
@@ -687,12 +687,12 @@ class SlotSentryPanel extends HTMLElement {
     }
 
     const dual = this._isDual;
-    const longLen = (this._config && this._config.code_length_long) || "?";
-    const shortLen = (this._config && this._config.code_length_short) || "?";
-    const singleLen = (this._config && (this._config.code_length_single || this._config.code_length_long)) || "?";
+    const code2Len = (this._config && this._config.code_length_2) || "?";
+    const code1Len = (this._config && this._config.code_length_1) || "?";
+    const singleLen = (this._config && (this._config.code_length_1 || this._config.code_length_2)) || "?";
     let headerCols = '<th class="col-num">#</th><th class="col-on">On</th><th>Label</th>';
     if (dual) {
-      headerCols += `<th>Long Code (${this._esc(longLen)}-digit)</th><th>Short Code (${this._esc(shortLen)}-digit)</th>`;
+      headerCols += `<th>Code 1 (${this._esc(code1Len)}-digit)</th><th>Code 2 (${this._esc(code2Len)}-digit)</th>`;
     } else {
       headerCols += `<th>Code (${this._esc(singleLen)}-digit)</th>`;
     }
@@ -717,8 +717,8 @@ class SlotSentryPanel extends HTMLElement {
   _renderSlotRowHTML(slot) {
     const n = slot.slot_number;
     const vals = this._editValues[n] || {
-      label: slot.label || "", long_code: slot.long_code || "",
-      short_code: slot.short_code || "", enabled: slot.enabled ?? false,
+      label: slot.label || "", code_1: slot.code_1 || "",
+      code_2: slot.code_2 || "", enabled: slot.enabled ?? false,
     };
     const saving = !!this._savingSlots[n];
     const deleting = !!this._deletingSlots[n];
@@ -734,9 +734,9 @@ class SlotSentryPanel extends HTMLElement {
     if (isEmpty) classes += " empty-slot";
     if (!vals.enabled) classes += " slot-disabled";
 
-    const longLen = (this._config && this._config.code_length_long) || "";
-    const shortLen = (this._config && this._config.code_length_short) || "";
-    const singleLen = (this._config && (this._config.code_length_single || this._config.code_length_long)) || "";
+    const code2Len = (this._config && this._config.code_length_2) || "";
+    const code1Len = (this._config && this._config.code_length_1) || "";
+    const singleLen = (this._config && (this._config.code_length_1 || this._config.code_length_2)) || "";
 
     let codeColumns = "";
     if (dual) {
@@ -746,8 +746,8 @@ class SlotSentryPanel extends HTMLElement {
         <td>
           <div class="code-cell">
             <input class="slot-input" type="${longRevealed ? "text" : "password"}"
-              placeholder="${longLen ? longLen + " digits" : "Long code"}" autocomplete="off"
-              data-slot="${n}" data-field="long_code" />
+              placeholder="${code1Len ? code1Len + " digits" : "Code 1"}" autocomplete="off"
+              data-slot="${n}" data-field="code_1" />
             <button class="reveal-btn" data-action="reveal" data-key="long-${n}"
               title="${longRevealed ? "Hide" : "Reveal"}">${longRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
           </div>
@@ -755,8 +755,8 @@ class SlotSentryPanel extends HTMLElement {
         <td>
           <div class="code-cell">
             <input class="slot-input" type="${shortRevealed ? "text" : "password"}"
-              placeholder="${shortLen ? shortLen + " digits" : "Short code"}" autocomplete="off"
-              data-slot="${n}" data-field="short_code" />
+              placeholder="${code2Len ? code2Len + " digits" : "Code 2"}" autocomplete="off"
+              data-slot="${n}" data-field="code_2" />
             <button class="reveal-btn" data-action="reveal" data-key="short-${n}"
               title="${shortRevealed ? "Hide" : "Reveal"}">${shortRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
           </div>
@@ -768,7 +768,7 @@ class SlotSentryPanel extends HTMLElement {
           <div class="code-cell">
             <input class="slot-input" type="${revealed ? "text" : "password"}"
               placeholder="${singleLen ? singleLen + " digits" : "Code"}" autocomplete="off"
-              data-slot="${n}" data-field="long_code" />
+              data-slot="${n}" data-field="code_1" />
             <button class="reveal-btn" data-action="reveal" data-key="code-${n}"
               title="${revealed ? "Hide" : "Reveal"}">${revealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
           </div>

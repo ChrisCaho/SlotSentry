@@ -125,8 +125,8 @@ class SlotData:
         return cls(
             slot_number=slot_number,
             label=data.get("label", ""),
-            code_1=data.get("code_1", data.get("long_code", "")),
-            code_2=data.get("code_2", data.get("short_code", "")),
+            code_1=data.get("code_1", data.get("short_code", "")),
+            code_2=data.get("code_2", data.get("long_code", "")),
             enabled=data.get("enabled", False),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
@@ -789,13 +789,18 @@ class SlotSentryStore:
 
     @staticmethod
     def _migrate_v1_to_v2(data: dict[str, Any]) -> dict[str, Any]:
-        """Migrate storage schema v1 → v2: rename long_code/short_code to code_1/code_2."""
+        """Migrate storage schema v1 → v2: rename long_code/short_code to code_1/code_2.
+
+        v1 used ``long_code`` (longer) / ``short_code`` (shorter).
+        v2 convention: ``code_1`` = shorter, ``code_2`` = longer
+        (matching ``code_length_1`` = shorter, ``code_length_2`` = longer).
+        """
         slots = data.get("slots", {})
         for slot_key, slot_data in slots.items():
-            if "long_code" in slot_data:
-                slot_data["code_1"] = slot_data.pop("long_code")
             if "short_code" in slot_data:
-                slot_data["code_2"] = slot_data.pop("short_code")
+                slot_data["code_1"] = slot_data.pop("short_code")
+            if "long_code" in slot_data:
+                slot_data["code_2"] = slot_data.pop("long_code")
             slot_data.setdefault("code_1", "")
             slot_data.setdefault("code_2", "")
         return data
