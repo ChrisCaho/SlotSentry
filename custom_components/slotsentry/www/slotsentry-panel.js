@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a10
+ * Version: 2026.4.0a11
  * Revision: 2.3
  *
  * Copyright (c) 2026 Chris Caho
@@ -420,17 +420,18 @@ class SlotSentryPanel extends HTMLElement {
   async _pushAll() {
     if (this._pushing) return;
     this._pushing = true;
-    this._pushProgress = "Initiating push to all locks\u2026";
+    this._pushProgress = "Pushing to all locks\u2026";
     this._scheduleRender();
 
     try {
       await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId });
-      this._toast("Push initiated for all locks.", "info");
-      this._startPushPoll();
+      this._toast("Push complete for all locks.", "success");
     } catch (err) {
       this._toast("Push failed: " + (err.message || err), "error");
+    } finally {
       this._pushing = false;
       this._pushProgress = "";
+      await this._refresh();
       this._scheduleRender();
     }
   }
@@ -446,55 +447,15 @@ class SlotSentryPanel extends HTMLElement {
         entry_id: this._entryId,
         lock_entity: lockEntity,
       });
-      this._toast("Push initiated for " + this._lockDisplayName(lockEntity) + ".", "info");
-      this._startPushPoll();
+      this._toast("Push complete for " + this._lockDisplayName(lockEntity) + ".", "success");
     } catch (err) {
       this._toast("Push failed: " + (err.message || err), "error");
     } finally {
       const s = { ...this._pushingLocks };
       delete s[lockEntity];
       this._pushingLocks = s;
+      await this._refresh();
       this._scheduleRender();
-    }
-  }
-
-  _startPushPoll() {
-    this._stopPushPoll();
-    this._pushPollStart = Date.now();
-    this._pushProgress = "Syncing\u2026";
-    this._pushing = true;
-    this._scheduleRender();
-
-    this._pushPollId = setInterval(async () => {
-      await this._loadStatus();
-      const elapsed = Date.now() - this._pushPollStart;
-      if (this._allLocksSynced()) {
-        this._stopPushPoll();
-        this._pushing = false;
-        this._pushProgress = "";
-        this._toast("All locks synced successfully.", "success");
-        this._scheduleRender();
-        return;
-      }
-      if (elapsed >= 30000) {
-        this._stopPushPoll();
-        this._pushing = false;
-        this._pushProgress = "";
-        this._toast("Push timed out. Check lock status below.", "error");
-        this._scheduleRender();
-        return;
-      }
-      const syncedLocks = Object.values(this._status).filter(s => s.state === "synced").length;
-      const totalLocks = Object.keys(this._status).length;
-      this._pushProgress = "Syncing\u2026 " + syncedLocks + "/" + totalLocks + " locks done (" + Math.round(elapsed / 1000) + "s)";
-      this._scheduleRender();
-    }, 2000);
-  }
-
-  _stopPushPoll() {
-    if (this._pushPollId) {
-      clearInterval(this._pushPollId);
-      this._pushPollId = null;
     }
   }
 
@@ -543,6 +504,7 @@ class SlotSentryPanel extends HTMLElement {
     if (!entries.length) return { label: "No Locks", cls: "" };
     if (entries.every(s => s.state === "synced")) return { label: "All Synced", cls: "synced" };
     if (entries.some(s => s.failed_count > 0)) return { label: "Errors", cls: "error" };
+    if (entries.some(s => s.state === "pending")) return { label: "Pending Sync", cls: "out_of_sync" };
     return { label: "Out of Sync", cls: "out_of_sync" };
   }
 
@@ -567,10 +529,11 @@ class SlotSentryPanel extends HTMLElement {
   _buildErrorSummary() {
     const lines = [];
     for (const [lockEntity, info] of Object.entries(this._status)) {
-      if (info.failed_count > 0 || info.uncertain_count > 0) {
+      if (info.failed_count > 0 || info.pending_count > 0 || info.uncertain_count > 0) {
         const name = this._lockDisplayName(lockEntity);
         const parts = [];
         if (info.failed_count) parts.push(info.failed_count + " failed");
+        if (info.pending_count) parts.push(info.pending_count + " pending");
         if (info.uncertain_count) parts.push(info.uncertain_count + " uncertain");
         if (info.dirty_slots && info.dirty_slots.length) {
           parts.push("slots: " + info.dirty_slots.slice(0, 10).join(", "));
@@ -578,7 +541,7 @@ class SlotSentryPanel extends HTMLElement {
         lines.push(name + ": " + parts.join(", "));
       }
     }
-    return lines.length ? lines.join("\n") : "No errors found.";
+    return lines.length ? lines.join("\n") : "No issues found.";
   }
 
   // ---------------------------------------------------------------------------
@@ -619,7 +582,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a10";
+    const version = "v2026.4.0a11";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Error badge: only show if there are actual errors; make it clickable
@@ -737,40 +700,47 @@ class SlotSentryPanel extends HTMLElement {
     const code2Len = (this._config && this._config.code_length_2) || "";
     const code1Len = (this._config && this._config.code_length_1) || "";
     const singleLen = (this._config && (this._config.code_length_1 || this._config.code_length_2)) || "";
+    const secure = !!(this._config && this._config.secure_mode);
 
     let codeColumns = "";
     if (dual) {
-      const longRevealed = !!this._revealMap["long-" + n];
-      const shortRevealed = !!this._revealMap["short-" + n];
+      const longRevealed = !secure || !!this._revealMap["long-" + n];
+      const shortRevealed = !secure || !!this._revealMap["short-" + n];
+      const revealBtn1 = secure
+        ? `<button class="reveal-btn" data-action="reveal" data-key="long-${n}"
+            title="${longRevealed ? "Hide" : "Reveal"}">${longRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>`
+        : "";
+      const revealBtn2 = secure
+        ? `<button class="reveal-btn" data-action="reveal" data-key="short-${n}"
+            title="${shortRevealed ? "Hide" : "Reveal"}">${shortRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>`
+        : "";
       codeColumns = `
         <td>
           <div class="code-cell">
             <input class="slot-input" type="${longRevealed ? "text" : "password"}"
               placeholder="${code1Len ? code1Len + " digits" : "Code 1"}" autocomplete="off"
-              data-slot="${n}" data-field="code_1" />
-            <button class="reveal-btn" data-action="reveal" data-key="long-${n}"
-              title="${longRevealed ? "Hide" : "Reveal"}">${longRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
+              data-slot="${n}" data-field="code_1" />${revealBtn1}
           </div>
         </td>
         <td>
           <div class="code-cell">
             <input class="slot-input" type="${shortRevealed ? "text" : "password"}"
               placeholder="${code2Len ? code2Len + " digits" : "Code 2"}" autocomplete="off"
-              data-slot="${n}" data-field="code_2" />
-            <button class="reveal-btn" data-action="reveal" data-key="short-${n}"
-              title="${shortRevealed ? "Hide" : "Reveal"}">${shortRevealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
+              data-slot="${n}" data-field="code_2" />${revealBtn2}
           </div>
         </td>`;
     } else {
-      const revealed = !!this._revealMap["code-" + n];
+      const revealed = !secure || !!this._revealMap["code-" + n];
+      const revealBtn = secure
+        ? `<button class="reveal-btn" data-action="reveal" data-key="code-${n}"
+            title="${revealed ? "Hide" : "Reveal"}">${revealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>`
+        : "";
       codeColumns = `
         <td>
           <div class="code-cell">
             <input class="slot-input" type="${revealed ? "text" : "password"}"
               placeholder="${singleLen ? singleLen + " digits" : "Code"}" autocomplete="off"
-              data-slot="${n}" data-field="code_1" />
-            <button class="reveal-btn" data-action="reveal" data-key="code-${n}"
-              title="${revealed ? "Hide" : "Reveal"}">${revealed ? this._iconEyeOffSVG() : this._iconEyeSVG()}</button>
+              data-slot="${n}" data-field="code_1" />${revealBtn}
           </div>
         </td>`;
     }
@@ -843,8 +813,9 @@ class SlotSentryPanel extends HTMLElement {
         </div>
         <div class="lock-counts">
           <span class="lock-count-item"><span class="dot dot-synced"></span>${info.synced_count ?? 0} synced</span>
-          <span class="lock-count-item"><span class="dot dot-failed"></span>${info.failed_count ?? 0} failed</span>
-          <span class="lock-count-item"><span class="dot dot-uncertain"></span>${info.uncertain_count ?? 0} uncertain</span>
+          ${(info.failed_count ?? 0) > 0 ? '<span class="lock-count-item"><span class="dot dot-failed"></span>' + info.failed_count + ' failed</span>' : ""}
+          ${(info.pending_count ?? 0) > 0 ? '<span class="lock-count-item"><span class="dot dot-dirty"></span>' + info.pending_count + ' pending</span>' : ""}
+          ${(info.uncertain_count ?? 0) > 0 ? '<span class="lock-count-item"><span class="dot dot-uncertain"></span>' + info.uncertain_count + ' uncertain</span>' : ""}
           ${dirtyCountHTML}
         </div>
         ${dirtyListHTML}

@@ -163,16 +163,15 @@ class SlotManager:
         for lock_entity in self._backends:
             self._store.initialise_lock_commits(lock_entity, self.slot_count)
 
-        # On fresh setup, mark empty slots as uncertain (never pushed).
-        # They transition to SYNC_SYNCED only after a successful push
-        # confirms the lock's actual state matches the integration.
+        # On fresh setup, mark empty+disabled slots as synced — there is
+        # nothing to push so they should not appear as errors or pending.
         existing_slots = self._store.get_slots()
         for lock_entity in self._backends:
             for sn, slot in existing_slots.items():
-                if not slot.code_1 and not slot.code_2 and not slot.label:
+                if not slot.enabled and slot.is_empty():
                     commit = self._store.get_lock_commit(lock_entity, sn)
-                    if commit.state == SYNC_OUT_OF_SYNC and commit.pushed_at is None:
-                        commit.state = SYNC_UNCERTAIN
+                    if commit.state != SYNC_SYNCED:
+                        commit.state = SYNC_SYNCED
                         self._store.set_lock_commit(lock_entity, commit)
 
         # Create one LockCommitMachine per lock backend.
@@ -398,25 +397,40 @@ class SlotManager:
         Returns:
             Mapping of ``lock_entity`` to a dict containing:
               - ``synced_count``: Number of slots confirmed in sync.
-              - ``failed_count``: Number of slots out_of_sync.
+              - ``failed_count``: Number of slots that failed a push attempt.
+              - ``pending_count``: Number of slots needing first push.
               - ``uncertain_count``: Number of slots in uncertain state.
               - ``dirty_slots``: List of slot numbers that need a push.
               - ``state``: Overall lock state — ``"synced"`` if all clean,
-                ``"out_of_sync"`` if any failed, ``"uncertain"`` otherwise.
+                ``"out_of_sync"`` if any failed, ``"pending"`` if never
+                pushed, ``"uncertain"`` otherwise.
         """
         result: dict[str, Any] = {}
+        existing_slots = self._store.get_slots()
+
         for lock_entity in self._backends:
             commits = self._store.get_all_lock_commits(lock_entity)
             synced = 0
             failed = 0
+            pending = 0
             uncertain = 0
             dirty: list[int] = []
 
             for sn, commit in commits.items():
+                # Skip empty+disabled slots — nothing to push.
+                slot = existing_slots.get(sn)
+                if slot and not slot.enabled and slot.is_empty():
+                    synced += 1
+                    continue
+
                 if commit.state == SYNC_SYNCED:
                     synced += 1
                 elif commit.state == SYNC_OUT_OF_SYNC:
-                    failed += 1
+                    if commit.pushed_at is None:
+                        # Never pushed — pending first sync, not a failure.
+                        pending += 1
+                    else:
+                        failed += 1
                     dirty.append(sn)
                 elif commit.state == SYNC_UNCERTAIN:
                     uncertain += 1
@@ -424,6 +438,8 @@ class SlotManager:
 
             if failed > 0:
                 overall = SYNC_OUT_OF_SYNC
+            elif pending > 0:
+                overall = "pending"
             elif uncertain > 0:
                 overall = SYNC_UNCERTAIN
             else:
@@ -433,6 +449,7 @@ class SlotManager:
                 "state": overall,
                 "synced_count": synced,
                 "failed_count": failed,
+                "pending_count": pending,
                 "uncertain_count": uncertain,
                 "dirty_slots": sorted(dirty),
             }

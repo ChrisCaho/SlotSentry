@@ -520,9 +520,19 @@ class LockCommitMachine:
         slot_number = slot.slot_number
         slot_info = SlotInfo(slot_number=slot_number, label=slot.label)
 
+        # Skip empty+disabled slots entirely — nothing to push or clear.
+        if not slot.enabled and slot.is_empty():
+            _LOGGER.debug(
+                "LockCommitMachine[%s]: slot %d is empty+disabled — skipping",
+                self._lock_entity,
+                slot_number,
+            )
+            return True, None
+
         # Determine whether to set or clear.
         if slot.is_empty() or not slot.enabled:
-            # Clear path: slot has no code or is disabled.
+            # Clear path: slot has no code, or is disabled but has data
+            # (user wants codes removed from lock).
             _LOGGER.debug(
                 "LockCommitMachine[%s]: slot %d is empty/disabled — clearing",
                 self._lock_entity,

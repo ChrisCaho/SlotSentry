@@ -475,6 +475,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         # Seed from existing lock
         self._readable_locks: dict[str, dict[int, str]] = {}
         self._seed_slots: list[dict[str, Any]] = []
+        self._seed_lock_names: list[str] = []  # friendly names of chosen seed locks
 
         self._lockout_enabled: bool = False
         self._lockout_trigger_entity: str | None = None
@@ -780,11 +781,21 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._seed_slots = []
+            self._seed_lock_names = []
 
             if self._code_length_mode == CODE_LENGTH_DUAL:
                 seed_1 = user_input.get("seed_lock_1", _NONE_VALUE)
                 seed_2 = user_input.get("seed_lock_2", _NONE_VALUE)
                 slot_num = 1
+
+                if seed_1 != _NONE_VALUE:
+                    self._seed_lock_names.append(
+                        f"Code 1: {_get_lock_name(self.hass, seed_1)}"
+                    )
+                if seed_2 != _NONE_VALUE:
+                    self._seed_lock_names.append(
+                        f"Code 2: {_get_lock_name(self.hass, seed_2)}"
+                    )
 
                 # Seed code_1 (shorter code length).
                 if seed_1 != _NONE_VALUE and seed_1 in self._readable_locks:
@@ -826,6 +837,10 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 # Single mode.
                 seed_lock = user_input.get("seed_lock", _NONE_VALUE)
+                if seed_lock != _NONE_VALUE:
+                    self._seed_lock_names.append(
+                        _get_lock_name(self.hass, seed_lock)
+                    )
                 if seed_lock != _NONE_VALUE and seed_lock in self._readable_locks:
                     codes = self._readable_locks[seed_lock]
                     slot_num = 1
@@ -850,11 +865,16 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_lockout()
 
         # Build dropdown options.
+        # When viable locks exist, default to the first one (not "None").
+        # Include "None" only as an opt-out when there are viable choices.
         none_option = SelectOptionDict(value=_NONE_VALUE, label="None")
+        no_locks_option = SelectOptionDict(
+            value=_NONE_VALUE, label="None Available"
+        )
 
         if self._code_length_mode == CODE_LENGTH_DUAL:
-            options_1 = [none_option]
-            options_2 = [none_option]
+            viable_1: list[SelectOptionDict] = []
+            viable_2: list[SelectOptionDict] = []
 
             for eid, codes in self._readable_locks.items():
                 name = _get_lock_name(self.hass, eid)
@@ -864,30 +884,35 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                            if self._code_length_2 is not None
                            and len(c) == self._code_length_2]
                 if codes_1:
-                    options_1.append(SelectOptionDict(
+                    viable_1.append(SelectOptionDict(
                         value=eid,
                         label=f"{name} ({len(codes_1)} codes, "
                               f"{self._code_length_1} digits)",
                     ))
                 if codes_2:
-                    options_2.append(SelectOptionDict(
+                    viable_2.append(SelectOptionDict(
                         value=eid,
                         label=f"{name} ({len(codes_2)} codes, "
                               f"{self._code_length_2} digits)",
                     ))
 
-            if len(options_1) == 1:
-                options_1 = [SelectOptionDict(
-                    value=_NONE_VALUE, label="None Available"
-                )]
-            if len(options_2) == 1:
-                options_2 = [SelectOptionDict(
-                    value=_NONE_VALUE, label="None Available"
-                )]
+            if viable_1:
+                options_1 = viable_1 + [none_option]
+                default_1 = viable_1[0]["value"]
+            else:
+                options_1 = [no_locks_option]
+                default_1 = _NONE_VALUE
+
+            if viable_2:
+                options_2 = viable_2 + [none_option]
+                default_2 = viable_2[0]["value"]
+            else:
+                options_2 = [no_locks_option]
+                default_2 = _NONE_VALUE
 
             schema = vol.Schema({
                 vol.Required(
-                    "seed_lock_1", default=_NONE_VALUE
+                    "seed_lock_1", default=default_1
                 ): SelectSelector(
                     SelectSelectorConfig(
                         options=options_1,
@@ -895,7 +920,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
                 ),
                 vol.Required(
-                    "seed_lock_2", default=_NONE_VALUE
+                    "seed_lock_2", default=default_2
                 ): SelectSelector(
                     SelectSelectorConfig(
                         options=options_2,
@@ -905,27 +930,29 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             })
         else:
             # Single mode — one dropdown.
-            lock_options: list[SelectOptionDict] = [none_option]
+            viable_single: list[SelectOptionDict] = []
 
             for eid, codes in self._readable_locks.items():
                 name = _get_lock_name(self.hass, eid)
                 matching = [c for c in codes.values()
                             if len(c) == self._code_length_1]
                 if matching:
-                    lock_options.append(SelectOptionDict(
+                    viable_single.append(SelectOptionDict(
                         value=eid,
                         label=f"{name} ({len(matching)} codes, "
                               f"{self._code_length_1} digits)",
                     ))
 
-            if len(lock_options) == 1:
-                lock_options = [SelectOptionDict(
-                    value=_NONE_VALUE, label="None Available"
-                )]
+            if viable_single:
+                lock_options = viable_single + [none_option]
+                default_single = viable_single[0]["value"]
+            else:
+                lock_options = [no_locks_option]
+                default_single = _NONE_VALUE
 
             schema = vol.Schema({
                 vol.Required(
-                    "seed_lock", default=_NONE_VALUE
+                    "seed_lock", default=default_single
                 ): SelectSelector(
                     SelectSelectorConfig(
                         options=lock_options,
@@ -1209,6 +1236,12 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         else:
             lockout_summary = "Disabled"
 
+        seed_summary = (
+            ", ".join(self._seed_lock_names)
+            if self._seed_lock_names
+            else "None"
+        )
+
         return self.async_show_form(
             step_id="confirm",
             data_schema=vol.Schema({}),
@@ -1219,6 +1252,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 "slot_count": str(self._slot_count),
                 "code_length_mode": mode_label,
                 "code_lengths": lengths_detail,
+                "seed_summary": seed_summary,
                 "lockout_summary": lockout_summary,
                 "secure_mode": "ON (encrypted)" if self._secure_mode else "OFF (plain text)",
             },

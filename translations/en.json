@@ -26,7 +26,7 @@
       },
       "seed": {
         "title": "Seed From Existing Lock — Optional",
-        "description": "SlotSentry can read existing PIN codes from a lock and use them as a starting point. Only locks that support full code readback are shown below.\n\nSelect a lock to seed from, or leave as \"None\" to start with empty slots. Codes will be read and filled into sequential slot numbers, collapsing any gaps.\n\nCode 1 = {code_length_1}-digit PINs. Code 2 = {code_length_2}-digit PINs.",
+        "description": "SlotSentry can read existing PIN codes from a lock and use them as a starting point. Only locks that support full code readback are shown below.\n\nViable locks are pre-selected. Select \"None\" to skip seeding for that code length. Codes will be read and filled into sequential slot numbers, collapsing any gaps.\n\nCode 1 = {code_length_1}-digit PINs. Code 2 = {code_length_2}-digit PINs.",
         "data": {
           "seed_lock": "Seed slot data from lock",
           "seed_lock_1": "Seed code 1 (shorter PIN) from lock",
@@ -54,7 +54,7 @@
       },
       "confirm": {
         "title": "Review & Confirm",
-        "description": "Locks ({lock_count}): {lock_list}\nSlots: {slot_count}\nCode Length: {code_length_mode} — {code_lengths}\nKeypad Lockout: {lockout_summary}\nSecure Mode: {secure_mode}\n\nClick Submit to finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
+        "description": "Locks ({lock_count}): {lock_list}\nSlots: {slot_count}\nCode Length: {code_length_mode} — {code_lengths}\nSeed From: {seed_summary}\nKeypad Lockout: {lockout_summary}\nSecure Mode: {secure_mode}\n\nClick Submit to finish setup. Open the SlotSentry panel from the sidebar to begin entering codes."
       },
       "reconfig_locks": {
         "title": "Reconfigure — Lock Selection",
