@@ -110,7 +110,7 @@ def _discover_zwave_locks(hass: HomeAssistant) -> list[dict[str, Any]]:
 async def _async_discover_lock_capabilities(
     hass: HomeAssistant, locks: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Probe each lock for slot count and code length.
+    """Probe each lock for slot count and code length (in parallel).
 
     Annotates each lock dict in-place with 'slots' and 'code_length' keys.
     Uses the Z-Wave User Code CC and searches for pin-length number entities
@@ -119,11 +119,11 @@ async def _async_discover_lock_capabilities(
     t_total = time.monotonic()
     registry = er.async_get(hass)
 
-    for lock in locks:
+    async def _probe_one(lock: dict[str, Any]) -> None:
         eid = lock["entity_id"]
         t_lock = time.monotonic()
 
-        # --- Slot count via User Code CC ---
+        # --- Slot count via node cache ---
         t0 = time.monotonic()
         lock["slots"] = await _async_get_max_user_codes(hass, eid)
         _LOGGER.info(
@@ -176,6 +176,8 @@ async def _async_discover_lock_capabilities(
             eid, time.monotonic() - t_lock, lock["slots"], lock["code_length"],
         )
 
+    await asyncio.gather(*[_probe_one(lock) for lock in locks])
+
     _LOGGER.info(
         "PERF _async_discover_lock_capabilities: %d lock(s) total %.3fs",
         len(locks), time.monotonic() - t_total,
@@ -211,99 +213,33 @@ def _build_lock_options_plain(locks: list[dict[str, Any]]) -> list[SelectOptionD
     ]
 
 
+def _get_zwave_node(hass: HomeAssistant, entity_id: str):
+    """Return the Z-Wave JS node object for an entity.
+
+    Handles varying return types across HA versions.
+    """
+    from homeassistant.components.zwave_js.helpers import (
+        async_get_node_from_entity_id,
+    )
+
+    node_info = async_get_node_from_entity_id(hass, entity_id)
+    return node_info[0] if isinstance(node_info, tuple) else node_info
+
+
 async def _async_get_max_user_codes(
     hass: HomeAssistant, entity_id: str
 ) -> int | None:
-    """Query the Z-Wave User Code CC for the supported number of code slots.
+    """Query the Z-Wave node cache for the supported number of code slots.
 
-    Three approaches, tried in order:
-      1. invoke_cc_api with ``getUsersCount`` (with one retry) — sends a
-         UserCodeCCUsersNumberGet command and returns the count directly.
-      2. Scan cached node ``userIdStatus`` values — finds the *highest*
-         slot number present in the Z-Wave JS node cache (gap-tolerant).
-      3. Returns None so the config flow can ask the user.
+    Scans cached ``userIdStatus`` values to find the highest slot number
+    present (gap-tolerant). Returns None if nothing found so the config
+    flow can ask the user.
     """
-    # -- Approach 1: getUsersCount via CC API (with retry) --
-    t_approach1 = time.monotonic()
-    for attempt in range(2):
-        t_attempt = time.monotonic()
-        try:
-            response = await hass.services.async_call(
-                "zwave_js",
-                "invoke_cc_api",
-                {
-                    "entity_id": entity_id,
-                    "command_class": 99,
-                    "endpoint": 0,
-                    "method_name": "getUsersCount",
-                    "parameters": [],
-                },
-                blocking=True,
-                return_response=True,
-            )
-            _LOGGER.info(
-                "PERF %s: getUsersCount CC API call attempt %d took %.3fs",
-                entity_id, attempt + 1, time.monotonic() - t_attempt,
-            )
-            if isinstance(response, dict):
-                payload = response.get(entity_id, response)
-                # getUsersCount returns a plain integer.
-                if isinstance(payload, int) and payload > 0:
-                    capped = min(payload, MAX_SLOTS)
-                    _LOGGER.info(
-                        "PERF %s: getUsersCount success in %.3fs total (approach 1)",
-                        entity_id, time.monotonic() - t_approach1,
-                    )
-                    return capped
-                # Some versions may wrap in a dict.
-                if isinstance(payload, dict):
-                    count = payload.get("supportedUsers")
-                    if isinstance(count, int) and count > 0:
-                        capped = min(count, MAX_SLOTS)
-                        _LOGGER.info(
-                            "getUsersCount (dict) reports %d slots for %s",
-                            capped,
-                            entity_id,
-                        )
-                        return capped
-            _LOGGER.warning(
-                "getUsersCount returned unusable response for %s "
-                "(attempt %d): %s",
-                entity_id,
-                attempt + 1,
-                response,
-            )
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning(
-                "getUsersCount CC API failed for %s (attempt %d)",
-                entity_id,
-                attempt + 1,
-                exc_info=True,
-            )
-        if attempt == 0:
-            await asyncio.sleep(2)
-
-    _LOGGER.info(
-        "PERF %s: approach 1 (getUsersCount) failed after %.3fs, trying approach 2",
-        entity_id, time.monotonic() - t_approach1,
-    )
-
-    # -- Approach 2: scan cached userIdStatus values (gap-tolerant) --
-    # Instead of stopping at the first missing slot, scan up to a
-    # reasonable max and find the highest slot number present. This
-    # handles incomplete Z-Wave node interviews that leave gaps.
     _SCAN_LIMIT = 50  # well above any residential lock capacity
-    t_approach2 = time.monotonic()
+    t0 = time.monotonic()
     try:
-        from homeassistant.components.zwave_js.helpers import (
-            async_get_node_from_entity_id,
-        )
+        node = _get_zwave_node(hass, entity_id)
         from zwave_js_server.util.node import get_value_id_str
-
-        node_info = async_get_node_from_entity_id(hass, entity_id)
-        # async_get_node_from_entity_id returns (node, ...) or just node
-        # depending on HA version — handle both.
-        node = node_info[0] if isinstance(node_info, tuple) else node_info
 
         max_found = 0
         for slot in range(1, _SCAN_LIMIT + 1):
@@ -316,19 +252,18 @@ async def _async_get_max_user_codes(
         if max_found > 0:
             capped = min(max_found, MAX_SLOTS)
             _LOGGER.info(
-                "PERF %s: node value scan found highest slot %d in %.3fs "
-                "(scanned 1–%d)",
-                entity_id, capped, time.monotonic() - t_approach2, _SCAN_LIMIT,
+                "PERF %s: node value scan found highest slot %d in %.3fs",
+                entity_id, capped, time.monotonic() - t0,
             )
             return capped
         _LOGGER.info(
             "PERF %s: node value scan found no slots in %.3fs",
-            entity_id, time.monotonic() - t_approach2,
+            entity_id, time.monotonic() - t0,
         )
     except Exception:  # noqa: BLE001
         _LOGGER.warning(
             "PERF %s: node value scan failed after %.3fs",
-            entity_id, time.monotonic() - t_approach2,
+            entity_id, time.monotonic() - t0,
             exc_info=True,
         )
 
@@ -343,52 +278,66 @@ async def _async_probe_lock_readback(
 ) -> bool:
     """Return True if the lock can return actual PIN digits for a code slot.
 
-    Probes slot 1 via the User Code CC ``get`` method. If the response
-    includes a non-empty ``userCode`` without asterisks, readback is
-    supported. Masked responses (asterisks) mean the lock is occupied but
-    unreadable.
+    Reads ``userCode`` and ``userIdStatus`` values directly from the Z-Wave
+    JS node cache for slots 1–5 (to handle empty slot 1). If any occupied
+    slot has actual digits, readback is supported. If any has asterisks,
+    the lock masks codes (not readable).
     """
     try:
-        response = await hass.services.async_call(
-            "zwave_js",
-            "invoke_cc_api",
-            {
-                "entity_id": entity_id,
-                "command_class": 99,
-                "endpoint": 0,
-                "method_name": "get",
-                "parameters": [1],
-            },
-            blocking=True,
-            return_response=True,
-        )
-        if not isinstance(response, dict):
-            return False
+        node = _get_zwave_node(hass, entity_id)
+        from zwave_js_server.util.node import get_value_id_str
 
-        payload = response.get(entity_id, response)
-        if isinstance(payload, dict):
-            user_code = payload.get("userCode")
-            user_status = payload.get("userIdStatus", 0)
-            # Status 0 = empty slot — can't tell if readback works.
-            # Non-zero status with actual digits = readable.
-            if user_status != 0 and user_code and "*" not in str(user_code):
-                _LOGGER.info(
-                    "Lock %s supports full readback (slot 1 returned digits)",
-                    entity_id,
-                )
-                return True
-            if user_status == 0:
-                _LOGGER.debug(
-                    "Lock %s slot 1 is empty — readback support unknown",
-                    entity_id,
-                )
-                return False
+        for slot in range(1, 6):
+            status_vid = get_value_id_str(
+                node, 99, "userIdStatus", endpoint=0, property_key=slot,
+            )
+            code_vid = get_value_id_str(
+                node, 99, "userCode", endpoint=0, property_key=slot,
+            )
+
+            status_val = node.values.get(status_vid)
+            code_val = node.values.get(code_vid)
+
+            if status_val is None:
+                continue
+
+            user_status = (
+                status_val.value
+                if hasattr(status_val, "value")
+                else status_val
+            )
+            if isinstance(user_status, dict):
+                user_status = user_status.get("value", 0)
+            if not user_status or user_status == 0:
+                continue
+
+            # Slot is occupied — check the code value.
+            user_code = (
+                code_val.value if hasattr(code_val, "value") else code_val
+            ) if code_val is not None else None
+
             if user_code and "*" in str(user_code):
                 _LOGGER.info(
-                    "Lock %s returns masked codes (asterisks) — not readable",
-                    entity_id,
+                    "Lock %s returns masked codes (asterisks, slot %d) "
+                    "— not readable",
+                    entity_id, slot,
                 )
                 return False
+
+            if user_code and str(user_code).strip():
+                code_str = str(user_code).strip()
+                if code_str.isdigit():
+                    _LOGGER.info(
+                        "Lock %s supports full readback "
+                        "(slot %d returned digits)",
+                        entity_id, slot,
+                    )
+                    return True
+
+        _LOGGER.debug(
+            "Lock %s: no occupied slots found in 1–5 — readback unknown",
+            entity_id,
+        )
         return False
     except Exception:  # noqa: BLE001
         _LOGGER.debug(
@@ -400,53 +349,63 @@ async def _async_probe_lock_readback(
 async def _async_read_lock_codes(
     hass: HomeAssistant, entity_id: str, max_slots: int,
 ) -> dict[int, str]:
-    """Read all occupied code slots from a lock.
+    """Read all occupied code slots from a lock via the Z-Wave node cache.
 
     Returns a dict of ``{slot_number: code_string}`` for all slots that
     contain actual digit codes (not empty, not masked).
     """
     codes: dict[int, str] = {}
 
-    for slot_num in range(1, max_slots + 1):
-        try:
-            response = await hass.services.async_call(
-                "zwave_js",
-                "invoke_cc_api",
-                {
-                    "entity_id": entity_id,
-                    "command_class": 99,
-                    "endpoint": 0,
-                    "method_name": "get",
-                    "parameters": [slot_num],
-                },
-                blocking=True,
-                return_response=True,
+    try:
+        node = _get_zwave_node(hass, entity_id)
+        from zwave_js_server.util.node import get_value_id_str
+
+        for slot_num in range(1, max_slots + 1):
+            status_vid = get_value_id_str(
+                node, 99, "userIdStatus", endpoint=0, property_key=slot_num,
             )
-            if not isinstance(response, dict):
+            code_vid = get_value_id_str(
+                node, 99, "userCode", endpoint=0, property_key=slot_num,
+            )
+
+            status_val = node.values.get(status_vid)
+            code_val = node.values.get(code_vid)
+
+            if status_val is None:
                 continue
 
-            payload = response.get(entity_id, response)
-            if isinstance(payload, dict):
-                user_code = payload.get("userCode")
-                user_status = payload.get("userIdStatus", 0)
-                if (
-                    user_status != 0
-                    and user_code
-                    and isinstance(user_code, str)
-                    and user_code.isdigit()
-                ):
-                    codes[slot_num] = user_code
-                    _LOGGER.debug(
-                        "Read code from %s slot %d (len=%d)",
-                        entity_id,
-                        slot_num,
-                        len(user_code),
-                    )
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug(
-                "Failed to read slot %d from %s", slot_num, entity_id,
-                exc_info=True,
+            user_status = (
+                status_val.value
+                if hasattr(status_val, "value")
+                else status_val
             )
+            if isinstance(user_status, dict):
+                user_status = user_status.get("value", 0)
+            if not user_status or user_status == 0:
+                continue
+
+            user_code = (
+                code_val.value if hasattr(code_val, "value") else code_val
+            ) if code_val is not None else None
+
+            if (
+                user_code
+                and isinstance(str(user_code), str)
+                and str(user_code).strip().isdigit()
+            ):
+                codes[slot_num] = str(user_code).strip()
+                _LOGGER.debug(
+                    "Read code from %s slot %d (len=%d)",
+                    entity_id,
+                    slot_num,
+                    len(codes[slot_num]),
+                )
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "Failed to read codes from %s via node cache",
+            entity_id,
+            exc_info=True,
+        )
 
     _LOGGER.info(
         "Read %d occupied code(s) from %s (scanned %d slots)",
@@ -459,12 +418,16 @@ async def _async_read_lock_codes(
 
 def _get_lock_default_code_length(
     discovered: dict[str, int | None], entity_id: str,
-) -> int:
-    """Return the default code length for a lock from discovery data."""
+) -> int | None:
+    """Return the default code length for a lock from discovery data.
+
+    Returns None when the code length was not discovered, so the UI can
+    show a placeholder prompting the user to select manually.
+    """
     val = discovered.get(entity_id)
     if val is not None and MIN_CODE_LENGTH <= val <= MAX_CODE_LENGTH:
         return val
-    return DEFAULT_CODE_LENGTH
+    return None
 
 
 def _get_lock_name(hass: HomeAssistant, entity_id: str) -> str:
@@ -710,8 +673,11 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             longer → code_length_2)
           - >2 distinct lengths → error (max 2 supported)
         """
-        # Build code length options (4–8 digits).
+        # Build code length options (4–8 digits) with placeholder.
+        _PLACEHOLDER_VALUE = ""
         code_len_options = [
+            SelectOptionDict(value=_PLACEHOLDER_VALUE, label="Select PIN length"),
+        ] + [
             SelectOptionDict(value=str(n), label=f"{n} digits")
             for n in range(MIN_CODE_LENGTH, MAX_CODE_LENGTH + 1)
         ]
@@ -721,40 +687,42 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             # Collect per-lock code lengths.
             per_lock: dict[str, int] = {}
+            has_unselected = False
             for eid in self._lock_entities:
                 field_key = f"code_length_{eid}"
                 val = user_input.get(field_key)
-                if val is not None:
+                if val is not None and val != _PLACEHOLDER_VALUE:
                     per_lock[eid] = int(val)
                 else:
-                    per_lock[eid] = _get_lock_default_code_length(
-                        self._discovered_code_lengths, eid,
-                    )
+                    has_unselected = True
 
-            distinct = sorted(set(per_lock.values()))
-
-            if len(distinct) > 2:
-                errors["base"] = "too_many_code_lengths"
+            if has_unselected:
+                errors["base"] = "no_code_length_selected"
             else:
-                self._per_lock_code_length = per_lock
+                distinct = sorted(set(per_lock.values()))
 
-                if len(distinct) == 1:
-                    self._code_length_mode = CODE_LENGTH_SINGLE
-                    self._code_length_1 = distinct[0]
-                    self._code_length_2 = None
+                if len(distinct) > 2:
+                    errors["base"] = "too_many_code_lengths"
                 else:
-                    self._code_length_mode = CODE_LENGTH_DUAL
-                    self._code_length_1 = distinct[0]  # shorter
-                    self._code_length_2 = distinct[1]  # longer
+                    self._per_lock_code_length = per_lock
 
-                _LOGGER.info(
-                    "Code lengths: mode=%s, cl1=%s, cl2=%s, per_lock=%s",
-                    self._code_length_mode,
-                    self._code_length_1,
-                    self._code_length_2,
-                    self._per_lock_code_length,
-                )
-                return await self.async_step_seed()
+                    if len(distinct) == 1:
+                        self._code_length_mode = CODE_LENGTH_SINGLE
+                        self._code_length_1 = distinct[0]
+                        self._code_length_2 = None
+                    else:
+                        self._code_length_mode = CODE_LENGTH_DUAL
+                        self._code_length_1 = distinct[0]  # shorter
+                        self._code_length_2 = distinct[1]  # longer
+
+                    _LOGGER.info(
+                        "Code lengths: mode=%s, cl1=%s, cl2=%s, per_lock=%s",
+                        self._code_length_mode,
+                        self._code_length_1,
+                        self._code_length_2,
+                        self._per_lock_code_length,
+                    )
+                    return await self.async_step_seed()
 
         # Build schema with one dropdown per lock.
         schema_fields: dict[Any, Any] = {}
@@ -766,11 +734,10 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             if eid in self._per_lock_code_length:
                 default_val = str(self._per_lock_code_length[eid])
             else:
-                default_val = str(
-                    _get_lock_default_code_length(
-                        self._discovered_code_lengths, eid,
-                    )
+                disc = _get_lock_default_code_length(
+                    self._discovered_code_lengths, eid,
                 )
+                default_val = str(disc) if disc is not None else _PLACEHOLDER_VALUE
 
             schema_fields[
                 vol.Required(field_key, default=default_val)
@@ -967,10 +934,16 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 ),
             })
 
+        placeholders: dict[str, str] = {
+            "code_length_1": str(self._code_length_1),
+            "code_length_2": str(self._code_length_2) if self._code_length_2 else "N/A",
+        }
+
         return self.async_show_form(
             step_id="seed",
             data_schema=schema,
             last_step=False,
+            description_placeholders=placeholders,
         )
 
     async def _async_discover_readable_locks(self) -> None:
