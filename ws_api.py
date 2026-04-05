@@ -51,6 +51,7 @@ from .const import (
     WS_LOCK,
     WS_PUSH_ALL,
     WS_PUSH_LOCK,
+    WS_CLEAR_ERRORS,
     WS_SECURE_STATUS,
     WS_SET_SLOT,
     WS_UNLOCK,
@@ -810,6 +811,37 @@ async def ws_secure_status(
 
 
 # ---------------------------------------------------------------------------
+# WS command: clear_errors
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_CLEAR_ERRORS,
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_clear_errors(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Reset session-only error and failure counters for all locks.
+
+    WebSocket command: ``slotsentry/clear_errors``
+    """
+    slot_manager = _get_slot_manager(hass, connection, msg)
+    if slot_manager is None:
+        return
+
+    slot_manager.clear_error_counters()
+    connection.send_result(msg["id"], {"success": True})
+    _LOGGER.debug("ws_clear_errors: counters cleared for entry %s", msg["entry_id"])
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -835,10 +867,11 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_unlock)
     websocket_api.async_register_command(hass, ws_lock)
     websocket_api.async_register_command(hass, ws_secure_status)
+    websocket_api.async_register_command(hass, ws_clear_errors)
 
     _LOGGER.debug(
         "SlotSentry: registered %d WebSocket command(s): %s",
-        10,
+        11,
         ", ".join(
             [
                 WS_GET_CONFIG,
@@ -851,6 +884,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
                 WS_UNLOCK,
                 WS_LOCK,
                 WS_SECURE_STATUS,
+                WS_CLEAR_ERRORS,
             ]
         ),
     )

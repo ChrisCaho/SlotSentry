@@ -520,17 +520,16 @@ class LockCommitMachine:
         slot_number = slot.slot_number
         slot_info = SlotInfo(slot_number=slot_number, label=slot.label)
 
-        # Skip empty+disabled slots entirely — nothing to push or clear.
-        if not slot.enabled and slot.is_empty():
+        # Disabled slots are invisible to locks — never push or clear.
+        if not slot.enabled:
             _LOGGER.debug(
-                "LockCommitMachine[%s]: slot %d is empty+disabled — skipping",
+                "LockCommitMachine[%s]: slot %d is disabled — skipping",
                 self._lock_entity,
                 slot_number,
             )
             return True, None
 
-        # Skip empty slots that have never been pushed — nothing on the lock
-        # to clear, so sending a clear command is wasteful.
+        # Empty slots that have never been pushed — nothing on lock to clear.
         commit = self._store.get_lock_commit(self._lock_entity, slot_number)
         if slot.is_empty() and (commit is None or commit.pushed_at is None):
             _LOGGER.debug(
@@ -541,7 +540,7 @@ class LockCommitMachine:
             return True, None
 
         # Determine whether to set or clear.
-        if slot.is_empty() or not slot.enabled:
+        if slot.is_empty():
             # Clear path: slot has no code, or is disabled but has data
             # (user wants codes removed from lock).
             _LOGGER.debug(
@@ -769,17 +768,16 @@ class LockCommitMachine:
     def _slot_needs_sync(self, slot: SlotData, commit: LockSlotCommit) -> bool:
         """Return True if this slot requires a push to the lock.
 
-        A slot needs sync when its commit state is not SYNCED, or when the
-        code stored on disk differs from the hash recorded at last push, or
-        (for name-based backends) when the label has changed.
-
-        Args:
-            slot:   Current SlotData from storage.
-            commit: Corresponding LockSlotCommit from storage.
-
-        Returns:
-            True if the slot should be pushed.
+        Disabled slots never need sync. Empty never-pushed slots skip too.
         """
+        # Disabled slots are invisible to locks.
+        if not slot.enabled:
+            return False
+
+        # Empty slots never pushed — nothing to clear.
+        if slot.is_empty() and commit.pushed_at is None:
+            return False
+
         if commit.state != SYNC_SYNCED:
             return True
 

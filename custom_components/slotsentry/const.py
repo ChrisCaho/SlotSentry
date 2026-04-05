@@ -52,6 +52,7 @@ WS_GET_CONFIG = "slotsentry/get_config"
 WS_UNLOCK = "slotsentry/unlock"
 WS_LOCK = "slotsentry/lock"
 WS_SECURE_STATUS = "slotsentry/secure_status"
+WS_CLEAR_ERRORS = "slotsentry/clear_errors"
 
 # Commit state machine states
 STATE_IDLE = "idle"
