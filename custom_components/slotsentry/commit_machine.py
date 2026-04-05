@@ -141,8 +141,15 @@ class LockCommitMachine:
         # asyncio.Task for the current push run, or None when idle.
         self._task: asyncio.Task | None = None
 
+        # Per-lock mutex — prevents overlapping pushes to the same lock
+        # (e.g., push_lock called while push_all is already running).
+        self._push_lock = asyncio.Lock()
+
         # Per-slot retry counters.  Keys are slot numbers (int).
         self._attempt_counts: dict[int, int] = {}
+
+        # Tracks the last Z-Wave call's elapsed time for adaptive delay.
+        self._last_call_elapsed: float = 0.0
 
         # Internal machine state for get_status().
         self._machine_state: str = STATE_IDLE
@@ -292,6 +299,27 @@ class LockCommitMachine:
         Returns:
             PushResult summary for the whole lock.
         """
+        # Acquire per-lock mutex to prevent overlapping pushes.
+        if self._push_lock.locked():
+            _LOGGER.warning(
+                "LockCommitMachine[%s]: push already in progress — waiting for lock",
+                self._lock_entity,
+            )
+        async with self._push_lock:
+            return await self._do_push_dirty_slots(
+                slots, code_length_mode, code_length_1, code_length_2,
+                lock_code_length,
+            )
+
+    async def _do_push_dirty_slots(
+        self,
+        slots: dict[int, SlotData],
+        code_length_mode: str,
+        code_length_1: int | None,
+        code_length_2: int | None,
+        lock_code_length: int | None = None,
+    ) -> PushResult:
+        """Inner push loop, runs under the per-lock asyncio.Lock."""
         self._machine_state = STATE_PUSHING
         result = PushResult(
             lock_entity=self._lock_entity,
@@ -356,15 +384,24 @@ class LockCommitMachine:
                     await asyncio.sleep(CONSECUTIVE_FAIL_COOLDOWN)
                     consecutive_failures = 0
 
-                # Inter-slot delay — give the Z-Wave mesh and lock breathing
-                # room between successive pushes (skip before the first push).
+                # Adaptive inter-slot delay — give the Z-Wave mesh and lock
+                # breathing room.  If the last call was slow (lock struggling),
+                # increase the delay proportionally.
                 if slots_actually_pushed > 0:
-                    _LOGGER.debug(
-                        "LockCommitMachine[%s]: inter-slot delay %.1fs",
-                        self._lock_entity,
+                    adaptive_delay = max(
                         INTER_SLOT_DELAY,
+                        self._last_call_elapsed / 5.0,
                     )
-                    await asyncio.sleep(INTER_SLOT_DELAY)
+                    # Cap at a reasonable maximum.
+                    adaptive_delay = min(adaptive_delay, 10.0)
+                    _LOGGER.debug(
+                        "LockCommitMachine[%s]: inter-slot delay %.1fs "
+                        "(last call took %.1fs)",
+                        self._lock_entity,
+                        adaptive_delay,
+                        self._last_call_elapsed,
+                    )
+                    await asyncio.sleep(adaptive_delay)
 
                 self._current_slot = slot_number
                 pre_synced = result.synced
@@ -448,10 +485,12 @@ class LockCommitMachine:
                 MAX_RETRIES,
             )
 
+            t0 = time.monotonic()
             success, error_msg = await self._attempt_push(
                 slot, code_length_mode, code_length_1, code_length_2,
                 lock_code_length,
             )
+            self._last_call_elapsed = time.monotonic() - t0
 
             if success:
                 # Update commit record: SUCCESS
@@ -587,21 +626,7 @@ class LockCommitMachine:
         if slot.is_empty():
             # Clear path: slot has no code, or is disabled but has data
             # (user wants codes removed from lock).
-            _LOGGER.debug(
-                "LockCommitMachine[%s]: slot %d is empty/disabled — clearing",
-                self._lock_entity,
-                slot_number,
-            )
-            try:
-                ok = await self._backend.async_clear_usercode(slot_info)
-            except Exception as exc:  # noqa: BLE001
-                return False, f"clear_usercode raised: {exc}"
-
-            if not ok:
-                return False, "async_clear_usercode returned False"
-
-            # No readback verification for a clear operation — trust the result.
-            return True, None
+            return await self._attempt_clear(slot_info)
 
         # Set path: select code to push.
         code = self._select_code_for_lock(
@@ -670,6 +695,108 @@ class LockCommitMachine:
                 )
 
         return True, None
+
+    # ------------------------------------------------------------------
+    # Clear with verification
+    # ------------------------------------------------------------------
+
+    async def _attempt_clear(
+        self, slot_info: SlotInfo
+    ) -> tuple[bool, str | None]:
+        """Clear a slot from the lock, with optional verification.
+
+        Schlage locks sometimes silently fail to clear slots. When the lock
+        supports readback, we use a robust clear sequence:
+          1. Set a random temporary code (forces the slot to "occupied" state)
+          2. Clear the slot
+          3. Read back to verify the slot is actually empty
+
+        On locks without readback support, we just clear and trust the result.
+        """
+        slot_number = slot_info.slot_number
+
+        if not self._backend.supports_readback:
+            # No readback — simple clear, trust the result.
+            _LOGGER.debug(
+                "LockCommitMachine[%s]: slot %d clearing (no readback)",
+                self._lock_entity,
+                slot_number,
+            )
+            try:
+                ok = await self._backend.async_clear_usercode(slot_info)
+            except Exception as exc:  # noqa: BLE001
+                return False, f"clear_usercode raised: {exc}"
+            if not ok:
+                return False, "async_clear_usercode returned False"
+            return True, None
+
+        # Readback-capable lock: robust clear sequence.
+        _LOGGER.info(
+            "LockCommitMachine[%s]: slot %d robust clear "
+            "(set temp → clear → verify)",
+            self._lock_entity,
+            slot_number,
+        )
+
+        # Step 1: Set a random temporary code to force "occupied" state.
+        import random
+        min_len, max_len = self._backend.supported_code_lengths
+        temp_len = max(min_len, 4)
+        temp_code = "".join(str(random.randint(0, 9)) for _ in range(temp_len))
+
+        try:
+            ok = await self._backend.async_set_usercode(slot_info, temp_code)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"clear: temp set_usercode raised: {exc}"
+        if not ok:
+            # Temp set failed — try direct clear anyway.
+            _LOGGER.warning(
+                "LockCommitMachine[%s]: slot %d temp code set failed, "
+                "trying direct clear",
+                self._lock_entity,
+                slot_number,
+            )
+
+        # Step 2: Clear the slot.
+        await asyncio.sleep(VERIFY_SETTLE_DELAY)
+        try:
+            ok = await self._backend.async_clear_usercode(slot_info)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"clear_usercode raised: {exc}"
+        if not ok:
+            return False, "async_clear_usercode returned False"
+
+        # Step 3: Verify the slot is actually empty.
+        await asyncio.sleep(VERIFY_SETTLE_DELAY)
+        try:
+            readback = await self._backend.async_get_usercode(slot_info)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "LockCommitMachine[%s]: slot %d clear verify readback failed; "
+                "treating as uncertain",
+                self._lock_entity,
+                slot_number,
+                exc_info=True,
+            )
+            return True, None  # Optimistic — clear probably worked.
+
+        if readback is None:
+            _LOGGER.info(
+                "LockCommitMachine[%s]: slot %d clear verified — slot is empty",
+                self._lock_entity,
+                slot_number,
+            )
+            return True, None
+
+        # Slot still has data after clear — the clear failed silently.
+        _LOGGER.warning(
+            "LockCommitMachine[%s]: slot %d still occupied after clear "
+            "(readback len=%d)",
+            self._lock_entity,
+            slot_number,
+            len(readback),
+        )
+        return False, f"clear verification failed: slot {slot_number} still occupied"
 
     # ------------------------------------------------------------------
     # Verification

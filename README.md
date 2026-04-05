@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/release/ChrisCaho/SlotSentry?style=flat)](https://github.com/ChrisCaho/SlotSentry/releases)
 
-# SlotSentry v2026.4.0a14
+# SlotSentry v2026.4.0a15
 
 Centralized Z-Wave lock user code management for Home Assistant. SlotSentry provides a professional sidebar panel UI for managing access codes across multiple Z-Wave smart locks with mixed code lengths, enabling per-slot controls, and optional password-protected storage.
 
