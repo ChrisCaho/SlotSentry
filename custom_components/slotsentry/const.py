@@ -9,7 +9,7 @@ Revision: 1.3
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a13"
+VERSION = "2026.4.0a14"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 2
@@ -24,9 +24,16 @@ MAX_CODE_LENGTH = 8
 MAX_SLOTS = 250  # Upper bound sanity check; actual count from lock capabilities
 
 # Push / commit
-PUSH_TIMEOUT_SECONDS = 30
+PUSH_TIMEOUT_SECONDS = 45  # Per-call timeout; S0 locks can take 30s+
 MAX_RETRIES = 3
 RETRY_BACKOFF = (5, 15, 30)  # Seconds between retries
+
+# Z-Wave pacing — prevents mesh congestion and lock buffer overflow
+INTER_SLOT_DELAY = 2.0       # Seconds between successful slot pushes to same lock
+INTER_LOCK_DELAY = 3.0       # Seconds between finishing one lock and starting the next
+VERIFY_SETTLE_DELAY = 1.5    # Seconds after set before readback verification
+CONSECUTIVE_FAIL_PAUSE = 3   # After N consecutive slot failures, pause the lock
+CONSECUTIVE_FAIL_COOLDOWN = 30.0  # Seconds to pause after consecutive failures
 
 # Secure mode
 MIN_PASSWORD_LENGTH = 8

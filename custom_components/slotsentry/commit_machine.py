@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -28,6 +29,9 @@ from typing import TYPE_CHECKING
 from .const import (
     ADDRESSING_NAME,
     CODE_LENGTH_DUAL,
+    CONSECUTIVE_FAIL_COOLDOWN,
+    CONSECUTIVE_FAIL_PAUSE,
+    INTER_SLOT_DELAY,
     MAX_RETRIES,
     RETRY_BACKOFF,
     STATE_FAILED,
@@ -39,6 +43,7 @@ from .const import (
     SYNC_OUT_OF_SYNC,
     SYNC_SYNCED,
     SYNC_UNCERTAIN,
+    VERIFY_SETTLE_DELAY,
 )
 from .lock_backend import LockBackend, SlotInfo
 from .storage import LockSlotCommit, SlotData, SlotSentryStore, hash_code
@@ -302,6 +307,10 @@ class LockCommitMachine:
             len(slots),
         )
 
+        push_start = time.monotonic()
+        consecutive_failures = 0
+        slots_actually_pushed = 0
+
         try:
             for slot_number in sorted(slots.keys()):
                 slot = slots[slot_number]
@@ -334,11 +343,42 @@ class LockCommitMachine:
                     result.failed += 1
                     continue
 
+                # Consecutive failure pause — if the lock is struggling,
+                # give it a long cooldown before trying more slots.
+                if consecutive_failures >= CONSECUTIVE_FAIL_PAUSE:
+                    _LOGGER.warning(
+                        "LockCommitMachine[%s]: %d consecutive failures — "
+                        "pausing %.0fs to let lock recover",
+                        self._lock_entity,
+                        consecutive_failures,
+                        CONSECUTIVE_FAIL_COOLDOWN,
+                    )
+                    await asyncio.sleep(CONSECUTIVE_FAIL_COOLDOWN)
+                    consecutive_failures = 0
+
+                # Inter-slot delay — give the Z-Wave mesh and lock breathing
+                # room between successive pushes (skip before the first push).
+                if slots_actually_pushed > 0:
+                    _LOGGER.debug(
+                        "LockCommitMachine[%s]: inter-slot delay %.1fs",
+                        self._lock_entity,
+                        INTER_SLOT_DELAY,
+                    )
+                    await asyncio.sleep(INTER_SLOT_DELAY)
+
                 self._current_slot = slot_number
+                pre_synced = result.synced
                 await self._push_slot_with_retry(
                     slot, commit, code_length_mode, code_length_1, code_length_2,
                     lock_code_length, result,
                 )
+                slots_actually_pushed += 1
+
+                # Track consecutive failures for cooldown logic.
+                if result.synced > pre_synced:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
 
         except asyncio.CancelledError:
             _LOGGER.info(
@@ -354,12 +394,16 @@ class LockCommitMachine:
             self._current_slot = None
             self._machine_state = STATE_IDLE
 
+        elapsed = time.monotonic() - push_start
         _LOGGER.info(
-            "LockCommitMachine[%s]: push complete — synced=%d failed=%d uncertain=%d",
+            "LockCommitMachine[%s]: push complete in %.1fs — "
+            "synced=%d failed=%d uncertain=%d (pushed %d slots)",
             self._lock_entity,
+            elapsed,
             result.synced,
             result.failed,
             result.uncertain,
+            slots_actually_pushed,
         )
         return result
 
@@ -607,8 +651,17 @@ class LockCommitMachine:
         if not ok:
             return False, "async_set_usercode returned False"
 
-        # Optionally verify the write.
+        # Optionally verify the write.  Wait for the lock to persist the
+        # code to flash before reading back — immediate reads can return the
+        # old value, causing false mismatches and unnecessary retries.
         if self._backend.supports_readback:
+            _LOGGER.debug(
+                "LockCommitMachine[%s]: slot %d waiting %.1fs before verify readback",
+                self._lock_entity,
+                slot_number,
+                VERIFY_SETTLE_DELAY,
+            )
+            await asyncio.sleep(VERIFY_SETTLE_DELAY)
             verified = await self._verify_slot(slot_info, code)
             if not verified:
                 return (

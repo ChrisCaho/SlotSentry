@@ -31,6 +31,7 @@ from .const import (
     CONF_SECURE_MODE,
     CONF_SLOT_COUNT,
     EVENT_PUSH_STATUS_CHANGED,
+    INTER_LOCK_DELAY,
     STATE_FAILED,
     STATE_RETRY,
     SYNC_OUT_OF_SYNC,
@@ -288,7 +289,18 @@ class SlotManager:
         cl2 = self.code_length_2
         plcl = self.per_lock_code_length
 
+        lock_count = 0
         for lock_entity, machine in self._machines.items():
+            # Inter-lock delay — give the Z-Wave mesh breathing room
+            # between finishing one lock and starting the next.
+            if lock_count > 0:
+                _LOGGER.info(
+                    "SlotManager: inter-lock delay %.0fs before %s",
+                    INTER_LOCK_DELAY,
+                    lock_entity,
+                )
+                await asyncio.sleep(INTER_LOCK_DELAY)
+
             self._active_push_lock = lock_entity
             self._fire_push_status_event()
 
@@ -308,6 +320,7 @@ class SlotManager:
                 )
 
             self._fire_push_status_event()
+            lock_count += 1
 
         self._active_push_lock = None
         self._fire_push_status_event()

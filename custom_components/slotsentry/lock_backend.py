@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -393,11 +394,12 @@ class ZWaveJSBackend:
             "code_slot": slot_info.slot_number,
             "usercode": code,
         }
-        _LOGGER.debug(
-            "ZWaveJSBackend.async_set_usercode: %s slot=%d",
+        _LOGGER.info(
+            "ZWaveJSBackend.async_set_usercode: %s slot=%d — sending",
             self._entity_id,
             slot_info.slot_number,
         )
+        t0 = time.monotonic()
         try:
             async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
                 await self._hass.services.async_call(
@@ -407,26 +409,31 @@ class ZWaveJSBackend:
                     blocking=True,
                 )
         except TimeoutError:
+            elapsed = time.monotonic() - t0
             _LOGGER.warning(
-                "ZWaveJSBackend.async_set_usercode: timeout after %ds "
+                "ZWaveJSBackend.async_set_usercode: TIMEOUT after %.1fs "
                 "for %s slot %d",
-                PUSH_TIMEOUT_SECONDS,
+                elapsed,
                 self._entity_id,
                 slot_info.slot_number,
             )
             return False
         except Exception:  # noqa: BLE001
+            elapsed = time.monotonic() - t0
             _LOGGER.warning(
-                "ZWaveJSBackend.async_set_usercode: service call failed "
+                "ZWaveJSBackend.async_set_usercode: FAILED after %.1fs "
                 "for %s slot %d",
+                elapsed,
                 self._entity_id,
                 slot_info.slot_number,
                 exc_info=True,
             )
             return False
 
-        _LOGGER.debug(
-            "ZWaveJSBackend.async_set_usercode: success %s slot=%d",
+        elapsed = time.monotonic() - t0
+        _LOGGER.info(
+            "ZWaveJSBackend.async_set_usercode: OK in %.1fs — %s slot=%d",
+            elapsed,
             self._entity_id,
             slot_info.slot_number,
         )
@@ -447,11 +454,12 @@ class ZWaveJSBackend:
             "entity_id": self._entity_id,
             "code_slot": slot_info.slot_number,
         }
-        _LOGGER.debug(
-            "ZWaveJSBackend.async_clear_usercode: %s slot=%d",
+        _LOGGER.info(
+            "ZWaveJSBackend.async_clear_usercode: %s slot=%d — sending",
             self._entity_id,
             slot_info.slot_number,
         )
+        t0 = time.monotonic()
         try:
             async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
                 await self._hass.services.async_call(
@@ -461,26 +469,31 @@ class ZWaveJSBackend:
                     blocking=True,
                 )
         except TimeoutError:
+            elapsed = time.monotonic() - t0
             _LOGGER.warning(
-                "ZWaveJSBackend.async_clear_usercode: timeout after %ds "
+                "ZWaveJSBackend.async_clear_usercode: TIMEOUT after %.1fs "
                 "for %s slot %d",
-                PUSH_TIMEOUT_SECONDS,
+                elapsed,
                 self._entity_id,
                 slot_info.slot_number,
             )
             return False
         except Exception:  # noqa: BLE001
+            elapsed = time.monotonic() - t0
             _LOGGER.warning(
-                "ZWaveJSBackend.async_clear_usercode: service call failed "
+                "ZWaveJSBackend.async_clear_usercode: FAILED after %.1fs "
                 "for %s slot %d",
+                elapsed,
                 self._entity_id,
                 slot_info.slot_number,
                 exc_info=True,
             )
             return False
 
-        _LOGGER.debug(
-            "ZWaveJSBackend.async_clear_usercode: success %s slot=%d",
+        elapsed = time.monotonic() - t0
+        _LOGGER.info(
+            "ZWaveJSBackend.async_clear_usercode: OK in %.1fs — %s slot=%d",
+            elapsed,
             self._entity_id,
             slot_info.slot_number,
         )
