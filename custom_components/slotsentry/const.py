@@ -9,7 +9,7 @@ Revision: 1.3
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a12"
+VERSION = "2026.4.0a13"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 2

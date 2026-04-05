@@ -1,8 +1,8 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a12
- * Revision: 2.3
+ * Version: 2026.4.0a13
+ * Revision: 3.0
  *
  * Copyright (c) 2026 Chris Caho
  * SPDX-License-Identifier: MIT
@@ -18,6 +18,7 @@
  *   slotsentry/push_all    — push all dirty slots to all locks
  *   slotsentry/push_lock   — push all dirty slots to one lock
  *   slotsentry/get_status  — per-lock sync summary
+ *   slotsentry/clear_errors — clear error counters
  */
 
 class SlotSentryPanel extends HTMLElement {
@@ -36,7 +37,6 @@ class SlotSentryPanel extends HTMLElement {
     this._pushProgress = "";
     this._toasts = [];
     this._revealMap = {};
-    this._savingSlots = {};
     this._deletingSlots = {};
     this._pushingLocks = {};
     this._activePushLock = null;
@@ -47,10 +47,11 @@ class SlotSentryPanel extends HTMLElement {
     this._initStarted = false;
     this._renderScheduled = false;
     this._updateAll = false;
-    this._dirty = false;
     this._eventsBound = false;
     this._savingAll = false;
     this._nextToastId = 0;
+    this._autoSaveTimers = {};
+    this._spinnerShownAt = {};
   }
 
   set hass(v) {
@@ -78,6 +79,11 @@ class SlotSentryPanel extends HTMLElement {
 
   disconnectedCallback() {
     this._stopPushPoll();
+    // Clear all auto-save timers
+    for (const key of Object.keys(this._autoSaveTimers)) {
+      clearTimeout(this._autoSaveTimers[key]);
+    }
+    this._autoSaveTimers = {};
   }
 
   // ---------------------------------------------------------------------------
@@ -227,64 +233,43 @@ class SlotSentryPanel extends HTMLElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Dirty tracking
+  // Auto-save logic
   // ---------------------------------------------------------------------------
 
-  _checkDirty() {
-    const wasDirty = this._dirty;
-    if (this._updateAll) { this._dirty = true; }
-    else {
-      this._dirty = false;
-      for (const slot of this._slots) {
-        const n = slot.slot_number;
-        const vals = this._editValues[n];
-        if (!vals) continue;
-        if (vals.label !== (slot.label || "") ||
-            vals.code_1 !== (slot.code_1 || "") ||
-            vals.code_2 !== (slot.code_2 || "") ||
-            vals.enabled !== (slot.enabled ?? false)) {
-          this._dirty = true;
-          break;
-        }
-      }
+  _scheduleAutoSave(slotNumber) {
+    // Cancel any existing timer for this slot
+    if (this._autoSaveTimers[slotNumber]) {
+      clearTimeout(this._autoSaveTimers[slotNumber]);
     }
-    if (this._dirty !== wasDirty) this._scheduleRender();
+    this._autoSaveTimers[slotNumber] = setTimeout(() => {
+      delete this._autoSaveTimers[slotNumber];
+      this._autoSaveSlot(slotNumber);
+    }, 3000);
   }
 
-  _isRowDirty(slot) {
-    const n = slot.slot_number;
-    const vals = this._editValues[n];
-    if (!vals) return false;
-    return vals.label !== (slot.label || "") ||
-      vals.code_1 !== (slot.code_1 || "") ||
-      vals.code_2 !== (slot.code_2 || "") ||
-      vals.enabled !== (slot.enabled ?? false);
+  _flushAllAutoSaveTimers() {
+    for (const key of Object.keys(this._autoSaveTimers)) {
+      clearTimeout(this._autoSaveTimers[key]);
+      delete this._autoSaveTimers[key];
+      // Fire the save synchronously (returns promise but we don't await here)
+      this._autoSaveSlot(parseInt(key, 10));
+    }
   }
 
-  // ---------------------------------------------------------------------------
-  // Slot actions
-  // ---------------------------------------------------------------------------
-
-  _onFieldInput(slotNumber, field, value) {
-    const cur = this._editValues[slotNumber] || {};
-    this._editValues = { ...this._editValues, [slotNumber]: { ...cur, [field]: value } };
-    this._checkDirty();
-    // Don't full re-render on keystrokes — just track state
-  }
-
-  _onEnabledChange(slotNumber, checked) {
-    const cur = this._editValues[slotNumber] || {};
-    this._editValues = { ...this._editValues, [slotNumber]: { ...cur, enabled: checked } };
-    this._checkDirty();
-    this._scheduleRender();
-  }
-
-  async _saveSlot(slotNumber) {
+  async _autoSaveSlot(slotNumber) {
     const vals = this._editValues[slotNumber];
     if (!vals) return;
 
-    this._savingSlots = { ...this._savingSlots, [slotNumber]: true };
-    this._scheduleRender();
+    // Check if anything actually changed from server state
+    const slot = this._slots.find(s => s.slot_number === slotNumber);
+    if (slot) {
+      const unchanged =
+        vals.label === (slot.label || "") &&
+        vals.code_1 === (slot.code_1 || "") &&
+        vals.code_2 === (slot.code_2 || "") &&
+        vals.enabled === (slot.enabled ?? false);
+      if (unchanged) return;
+    }
 
     try {
       await this._hass.callWS({
@@ -296,21 +281,57 @@ class SlotSentryPanel extends HTMLElement {
         code_2: vals.code_2 || "",
         enabled: !!vals.enabled,
       });
-      this._toast("Slot " + slotNumber + " saved.", "success");
       // Clear cached edit for this slot so it reloads fresh
       const ev = { ...this._editValues };
       delete ev[slotNumber];
       this._editValues = ev;
       await this._refresh();
     } catch (err) {
-      this._toast("Save failed: " + (err.message || err), "error");
-    } finally {
-      const s = { ...this._savingSlots };
-      delete s[slotNumber];
-      this._savingSlots = s;
-      this._checkDirty();
-      this._scheduleRender();
+      this._toast("Auto-save slot " + slotNumber + " failed: " + (err.message || err), "error");
     }
+  }
+
+  _readRowValuesFromDOM(slotNumber) {
+    const root = this.shadowRoot;
+    const inputs = root.querySelectorAll(`input[data-slot="${slotNumber}"]`);
+    const cur = this._editValues[slotNumber] || {};
+    const updated = { ...cur };
+    for (const inp of inputs) {
+      const field = inp.dataset.field;
+      if (field === "enabled") {
+        updated.enabled = inp.checked;
+      } else if (field) {
+        updated[field] = inp.value;
+      }
+    }
+    this._editValues = { ...this._editValues, [slotNumber]: updated };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Slot actions
+  // ---------------------------------------------------------------------------
+
+  _onFieldInput(slotNumber, field, value) {
+    const cur = this._editValues[slotNumber] || {};
+    this._editValues = { ...this._editValues, [slotNumber]: { ...cur, [field]: value } };
+    // Don't full re-render on keystrokes — just track state
+  }
+
+  _onEnabledChange(slotNumber, checked) {
+    const cur = this._editValues[slotNumber] || {};
+    this._editValues = { ...this._editValues, [slotNumber]: { ...cur, enabled: checked } };
+    // Immediate save for checkbox toggle (no debounce)
+    this._autoSaveSlot(slotNumber);
+  }
+
+  _isRowDirty(slot) {
+    const n = slot.slot_number;
+    const vals = this._editValues[n];
+    if (!vals) return false;
+    return vals.label !== (slot.label || "") ||
+      vals.code_1 !== (slot.code_1 || "") ||
+      vals.code_2 !== (slot.code_2 || "") ||
+      vals.enabled !== (slot.enabled ?? false);
   }
 
   async _deleteSlot(slotNumber) {
@@ -336,7 +357,6 @@ class SlotSentryPanel extends HTMLElement {
       const s = { ...this._deletingSlots };
       delete s[slotNumber];
       this._deletingSlots = s;
-      this._checkDirty();
       this._scheduleRender();
     }
   }
@@ -394,24 +414,24 @@ class SlotSentryPanel extends HTMLElement {
     // Clear all cached edits and reload
     this._editValues = {};
     await this._refresh();
-    this._checkDirty();
     this._scheduleRender();
   }
 
-  _discardAll() {
-    this._editValues = {};
-    this._updateAll = false;
-    // Re-seed from current slot data
-    for (const slot of this._slots) {
-      this._editValues[slot.slot_number] = {
-        label: slot.label || "",
-        code_1: slot.code_1 || "",
-        code_2: slot.code_2 || "",
-        enabled: slot.enabled ?? false,
-      };
+  // ---------------------------------------------------------------------------
+  // Clear errors
+  // ---------------------------------------------------------------------------
+
+  async _clearErrors() {
+    try {
+      await this._hass.callWS({
+        type: "slotsentry/clear_errors",
+        entry_id: this._entryId,
+      });
+      this._toast("Error counters cleared.", "success");
+      await this._loadStatus();
+    } catch (err) {
+      this._toast("Clear errors failed: " + (err.message || err), "error");
     }
-    this._dirty = false;
-    this._scheduleRender();
   }
 
   // ---------------------------------------------------------------------------
@@ -420,6 +440,8 @@ class SlotSentryPanel extends HTMLElement {
 
   async _pushAll() {
     if (this._pushing) return;
+    // Flush all pending auto-save timers before pushing
+    this._flushAllAutoSaveTimers();
     this._pushing = true;
     this._pushProgress = "Pushing to all locks\u2026";
     this._scheduleRender();
@@ -437,6 +459,8 @@ class SlotSentryPanel extends HTMLElement {
 
   async _pushLock(lockEntity) {
     if (this._pushingLocks[lockEntity] || this._pushing) return;
+    // Flush all pending auto-save timers before pushing
+    this._flushAllAutoSaveTimers();
     this._pushingLocks = { ...this._pushingLocks, [lockEntity]: true };
     this._scheduleRender();
 
@@ -478,18 +502,37 @@ class SlotSentryPanel extends HTMLElement {
         entry_id: this._entryId,
       });
       this._status = resp.status || {};
-      this._activePushLock = resp.active_push_lock || null;
+      const newActiveLock = resp.active_push_lock || null;
+
+      // Spinner minimum display time: ensure at least 1s before transitioning
+      if (this._activePushLock && this._activePushLock !== newActiveLock) {
+        const shownAt = this._spinnerShownAt[this._activePushLock] || 0;
+        const elapsed = Date.now() - shownAt;
+        if (elapsed < 1000) {
+          // Wait the remaining time before updating
+          const remaining = 1000 - elapsed;
+          setTimeout(() => {
+            this._activePushLock = newActiveLock;
+            if (newActiveLock) {
+              this._spinnerShownAt[newActiveLock] = Date.now();
+              this._pushProgress = "Pushing to " + this._lockDisplayName(newActiveLock) + "\u2026";
+            } else {
+              this._finishPush();
+            }
+            this._scheduleRender();
+          }, remaining);
+          return;
+        }
+      }
+
+      this._activePushLock = newActiveLock;
 
       if (!this._activePushLock) {
-        // Push finished — clean up.
-        this._stopPushPoll();
-        this._pushing = false;
-        this._pushProgress = "";
-        this._pushingLocks = {};
-        this._activePushLock = null;
-        await this._loadSlots();
-        this._toast("Push complete.", "success");
+        this._finishPush();
       } else {
+        if (!this._spinnerShownAt[this._activePushLock]) {
+          this._spinnerShownAt[this._activePushLock] = Date.now();
+        }
         this._pushProgress = "Pushing to " + this._lockDisplayName(this._activePushLock) + "\u2026";
       }
     } catch (err) {
@@ -500,10 +543,22 @@ class SlotSentryPanel extends HTMLElement {
         this._pushProgress = "";
         this._pushingLocks = {};
         this._activePushLock = null;
+        this._spinnerShownAt = {};
         this._toast("Push status poll timed out.", "error");
       }
     }
     this._scheduleRender();
+  }
+
+  _finishPush() {
+    this._stopPushPoll();
+    this._pushing = false;
+    this._pushProgress = "";
+    this._pushingLocks = {};
+    this._activePushLock = null;
+    this._spinnerShownAt = {};
+    this._loadSlots();
+    this._toast("Push complete.", "success");
   }
 
   _allLocksSynced() {
@@ -561,7 +616,8 @@ class SlotSentryPanel extends HTMLElement {
 
   _isSlotDirtyOnLock(slotNumber) {
     return Object.values(this._status).some(
-      s => Array.isArray(s.dirty_slots) && s.dirty_slots.includes(slotNumber)
+      s => (Array.isArray(s.dirty_slots) && s.dirty_slots.includes(slotNumber)) ||
+           (Array.isArray(s.failed_slots) && s.failed_slots.includes(slotNumber))
     );
   }
 
@@ -569,7 +625,7 @@ class SlotSentryPanel extends HTMLElement {
     const entries = Object.values(this._status);
     if (!entries.length) return { cls: "", tip: "No status" };
     const dirty = this._isSlotDirtyOnLock(slotNumber);
-    if (dirty) return { cls: "sync-dirty", tip: "Out of sync — needs push" };
+    if (dirty) return { cls: "sync-dirty", tip: "Out of sync \u2014 needs push" };
     return { cls: "sync-ok", tip: "Synced" };
   }
 
@@ -582,8 +638,11 @@ class SlotSentryPanel extends HTMLElement {
         if (info.failed_count) parts.push(info.failed_count + " failed");
         if (info.pending_count) parts.push(info.pending_count + " pending");
         if (info.uncertain_count) parts.push(info.uncertain_count + " uncertain");
+        if (info.failed_slots && info.failed_slots.length) {
+          parts.push("failed slots: " + info.failed_slots.slice(0, 10).join(", "));
+        }
         if (info.dirty_slots && info.dirty_slots.length) {
-          parts.push("slots: " + info.dirty_slots.slice(0, 10).join(", "));
+          parts.push("dirty slots: " + info.dirty_slots.slice(0, 10).join(", "));
         }
         lines.push(name + ": " + parts.join(", "));
       }
@@ -629,8 +688,13 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a12";
+    const version = "v2026.4.0a13";
     const modeName = this._isDual ? "Dual" : "Single";
+
+    // Check if any errors exist for the Clear Errors button
+    const hasErrors = Object.values(this._status).some(
+      s => (s.error_count > 0) || (s.failure_count > 0) || (s.failed_count > 0)
+    );
 
     // Error badge: only show if there are actual errors; make it clickable
     let badgeHTML = "";
@@ -657,6 +721,7 @@ class SlotSentryPanel extends HTMLElement {
         </div>
         <div class="header-actions">
           ${badgeHTML}
+          ${hasErrors ? '<button class="btn btn-clear-errors" data-action="clear-errors" title="Clear error counters">Clear Errors</button>' : ''}
           <button class="btn btn-primary" data-action="push-all" ${this._pushing || this._savingAll || this._activePushLock ? "disabled" : ""}>
             ${this._pushing || this._activePushLock
               ? '<div class="spinner-sm"></div> Pushing\u2026'
@@ -677,9 +742,11 @@ class SlotSentryPanel extends HTMLElement {
             Update All Slots
           </label>
           <div class="bottom-actions">
-            ${this._dirty
-              ? '<button class="btn btn-discard" data-action="discard">Discard</button><button class="btn btn-save" data-action="save-all">Save</button>'
-              : ''}
+            <button class="btn btn-save-disk" data-action="save-all">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M17 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+              Save to Disk
+              <span class="btn-subtitle">(no push to locks)</span>
+            </button>
           </div>
         </div>
 
@@ -730,16 +797,13 @@ class SlotSentryPanel extends HTMLElement {
       label: slot.label || "", code_1: slot.code_1 || "",
       code_2: slot.code_2 || "", enabled: slot.enabled ?? false,
     };
-    const saving = !!this._savingSlots[n];
     const deleting = !!this._deletingSlots[n];
-    const rowDirty = this._isRowDirty(slot);
     const lockDirty = this._isSlotDirtyOnLock(n);
     const isEmpty = this._isSlotEmpty(slot);
-    const disabled = saving || deleting ? "disabled" : "";
+    const disabled = deleting ? "disabled" : "";
     const dual = this._isDual;
 
     let classes = "";
-    if (rowDirty) classes += " slot-edited";
     if (lockDirty) classes += " slot-dirty";
     if (isEmpty) classes += " empty-slot";
     if (!vals.enabled) classes += " slot-disabled";
@@ -812,9 +876,6 @@ class SlotSentryPanel extends HTMLElement {
         </td>
         <td>
           <div class="actions-cell">
-            <button class="btn btn-save btn-sm" data-action="save" data-slot="${n}" ${disabled}>
-              ${saving ? '<div class="spinner-xs"></div>' : "Save"}
-            </button>
             <button class="btn btn-delete btn-sm" data-action="delete" data-slot="${n}" ${disabled}>
               ${deleting ? '<div class="spinner-xs"></div>' : "Clear"}
             </button>
@@ -840,13 +901,25 @@ class SlotSentryPanel extends HTMLElement {
     const state = info.state || "uncertain";
     const isActive = this._activePushLock === lockEntity;
 
-    let dirtyCountHTML = "";
-    let dirtyListHTML = "";
-    if (info.dirty_slots && info.dirty_slots.length) {
-      dirtyCountHTML = '<span class="lock-count-item"><span class="dot dot-dirty"></span>' + info.dirty_slots.length + ' dirty</span>';
+    // Error/failure counters
+    let errorCountHTML = "";
+    if ((info.error_count ?? 0) > 0) {
+      errorCountHTML += '<span class="lock-count-item"><span class="dot dot-failed"></span>' + info.error_count + ' errors</span>';
+    }
+    if ((info.failure_count ?? 0) > 0) {
+      errorCountHTML += '<span class="lock-count-item"><span class="dot dot-failed"></span>' + info.failure_count + ' failures</span>';
+    }
+
+    // Failed slots display
+    let failedSlotsHTML = "";
+    if (info.failed_slots && info.failed_slots.length) {
+      const shown = info.failed_slots.slice(0, 15).join(", ");
+      const extra = info.failed_slots.length > 15 ? (" +" + (info.failed_slots.length - 15) + " more") : "";
+      failedSlotsHTML = '<div class="dirty-slots failed-slots-list">Not Synced: ' + this._esc(shown + extra) + '</div>';
+    } else if (info.dirty_slots && info.dirty_slots.length) {
       const shown = info.dirty_slots.slice(0, 10).join(", ");
       const extra = info.dirty_slots.length > 10 ? (" +" + (info.dirty_slots.length - 10) + " more") : "";
-      dirtyListHTML = '<div class="dirty-slots">Pending: ' + this._esc(shown + extra) + '</div>';
+      failedSlotsHTML = '<div class="dirty-slots">Pending: ' + this._esc(shown + extra) + '</div>';
     }
 
     const overlayHTML = isActive
@@ -868,9 +941,9 @@ class SlotSentryPanel extends HTMLElement {
           ${(info.failed_count ?? 0) > 0 ? '<span class="lock-count-item"><span class="dot dot-failed"></span>' + info.failed_count + ' failed</span>' : ""}
           ${(info.pending_count ?? 0) > 0 ? '<span class="lock-count-item"><span class="dot dot-dirty"></span>' + info.pending_count + ' pending</span>' : ""}
           ${(info.uncertain_count ?? 0) > 0 ? '<span class="lock-count-item"><span class="dot dot-uncertain"></span>' + info.uncertain_count + ' uncertain</span>' : ""}
-          ${dirtyCountHTML}
+          ${errorCountHTML}
         </div>
-        ${dirtyListHTML}
+        ${failedSlotsHTML}
         <div class="lock-actions">
           <button class="btn btn-push-lock" data-action="push-lock" data-lock="${this._esc(lockEntity)}"
             ${isActive || this._pushing || this._activePushLock ? "disabled" : ""}>
@@ -902,12 +975,11 @@ class SlotSentryPanel extends HTMLElement {
       const action = btn.dataset.action;
       if (action === "retry") { this._initStarted = false; this._init(); }
       else if (action === "push-all") { this._pushAll(); }
-      else if (action === "save") { this._saveSlot(parseInt(btn.dataset.slot, 10)); }
       else if (action === "delete") { this._deleteSlot(parseInt(btn.dataset.slot, 10)); }
       else if (action === "reveal") { this._toggleReveal(btn.dataset.key); }
       else if (action === "push-lock") { this._pushLock(btn.dataset.lock); }
       else if (action === "save-all") { this._saveAll(); }
-      else if (action === "discard") { this._discardAll(); }
+      else if (action === "clear-errors") { this._clearErrors(); }
       else if (action === "show-errors") { window.alert(this._buildErrorSummary()); }
     });
 
@@ -925,8 +997,17 @@ class SlotSentryPanel extends HTMLElement {
       }
       if (inp.dataset.action === "update-all") {
         this._updateAll = inp.checked;
-        this._checkDirty();
         this._scheduleRender();
+      }
+    });
+
+    // Blur events on input fields trigger auto-save debounce
+    root.addEventListener("focusout", (e) => {
+      const inp = e.target;
+      if (inp.dataset.slot && inp.dataset.field && inp.dataset.field !== "enabled") {
+        const slotNumber = parseInt(inp.dataset.slot, 10);
+        this._readRowValuesFromDOM(slotNumber);
+        this._scheduleAutoSave(slotNumber);
       }
     });
   }
@@ -1021,6 +1102,16 @@ class SlotSentryPanel extends HTMLElement {
       .btn-delete { background: var(--ss-error); color: #fff; }
       .btn-discard { background: var(--ss-uncertain); color: #fff; }
       .btn-push-lock { background: var(--ss-accent); color: var(--ss-accent-text); font-size: 12px; padding: 4px 10px; }
+      .btn-clear-errors {
+        background: var(--ss-warning); color: #fff; font-size: 12px; padding: 4px 12px;
+      }
+      .btn-save-disk {
+        background: var(--ss-success); color: #fff;
+        flex-direction: column; align-items: center; line-height: 1.3;
+      }
+      .btn-subtitle {
+        font-size: 10px; font-weight: 400; opacity: 0.85;
+      }
 
       /* Content */
       .content { padding: 20px 24px 40px; max-width: 1200px; margin: 0 auto; }
@@ -1050,7 +1141,6 @@ class SlotSentryPanel extends HTMLElement {
       .col-on { width: 40px; text-align: center; }
       .slot-num { font-weight: 600; color: var(--secondary-text-color); text-align: center; }
 
-      tr.slot-edited { background: rgba(255, 235, 59, 0.12); }
       tr.slot-dirty { background: rgba(255, 152, 0, 0.08); }
       tr.empty-slot td { opacity: 0.6; }
       tr.slot-disabled td:not(.slot-num):not(.col-on) { opacity: 0.4; }
@@ -1134,6 +1224,7 @@ class SlotSentryPanel extends HTMLElement {
       .dot-dirty { background: var(--ss-dirty); }
 
       .dirty-slots { font-size: 11px; color: var(--secondary-text-color); margin-bottom: 8px; font-style: italic; }
+      .failed-slots-list { color: var(--ss-error); font-weight: 500; }
       .lock-actions { display: flex; justify-content: flex-end; }
 
       /* Loading / Error */
