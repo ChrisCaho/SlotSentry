@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a13
+ * Version: 2026.4.0a15
  * Revision: 3.0
  *
  * Copyright (c) 2026 Chris Caho
@@ -237,14 +237,38 @@ class SlotSentryPanel extends HTMLElement {
   // ---------------------------------------------------------------------------
 
   _scheduleAutoSave(slotNumber) {
+    // Don't schedule if a code field has a partial entry.
+    if (this._hasPartialCode(slotNumber)) return;
+
     // Cancel any existing timer for this slot
     if (this._autoSaveTimers[slotNumber]) {
       clearTimeout(this._autoSaveTimers[slotNumber]);
     }
     this._autoSaveTimers[slotNumber] = setTimeout(() => {
       delete this._autoSaveTimers[slotNumber];
+      // Re-check at fire time — user may have started typing again.
+      if (this._hasPartialCode(slotNumber)) return;
       this._autoSaveSlot(slotNumber);
     }, 3000);
+  }
+
+  /** True if any code field for this slot has a non-empty value that
+   *  doesn't match the required length (user is mid-entry). */
+  _hasPartialCode(slotNumber) {
+    const vals = this._editValues[slotNumber];
+    if (!vals) return false;
+    const cfg = this._config || {};
+    const dual = this._isDual;
+    if (dual) {
+      const len1 = cfg.code_length_1 || 0;
+      const len2 = cfg.code_length_2 || 0;
+      if (vals.code_1 && vals.code_1.length > 0 && vals.code_1.length !== len1) return true;
+      if (vals.code_2 && vals.code_2.length > 0 && vals.code_2.length !== len2) return true;
+    } else {
+      const len = cfg.code_length_1 || cfg.code_length_2 || 0;
+      if (vals.code_1 && vals.code_1.length > 0 && vals.code_1.length !== len) return true;
+    }
+    return false;
   }
 
   _flushAllAutoSaveTimers() {
@@ -281,11 +305,17 @@ class SlotSentryPanel extends HTMLElement {
         code_2: vals.code_2 || "",
         enabled: !!vals.enabled,
       });
-      // Clear cached edit for this slot so it reloads fresh
-      const ev = { ...this._editValues };
-      delete ev[slotNumber];
-      this._editValues = ev;
-      await this._refresh();
+      // Update local _slots in-place so we stay in sync with the server
+      // WITHOUT triggering a full refresh/re-render (which would blow away
+      // any in-progress edits the user is making in other fields).
+      if (slot) {
+        slot.label = vals.label || "";
+        slot.code_1 = vals.code_1 || "";
+        slot.code_2 = vals.code_2 || "";
+        slot.enabled = !!vals.enabled;
+      }
+      // Keep editValues — do NOT delete them. The user may still be
+      // editing adjacent rows, and a re-render would wipe their input.
     } catch (err) {
       this._toast("Auto-save slot " + slotNumber + " failed: " + (err.message || err), "error");
     }
@@ -688,7 +718,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a13";
+    const version = "v2026.4.0a15";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Check if any errors exist for the Clear Errors button
@@ -830,6 +860,7 @@ class SlotSentryPanel extends HTMLElement {
           <div class="code-cell">
             <input class="slot-input" type="${longRevealed ? "text" : "password"}"
               placeholder="${code1Len ? code1Len + " digits" : "Code 1"}" autocomplete="off"
+              inputmode="numeric" pattern="[0-9]*" ${code1Len ? 'maxlength="' + code1Len + '"' : ""}
               data-slot="${n}" data-field="code_1" />${revealBtn1}
           </div>
         </td>
@@ -837,6 +868,7 @@ class SlotSentryPanel extends HTMLElement {
           <div class="code-cell">
             <input class="slot-input" type="${shortRevealed ? "text" : "password"}"
               placeholder="${code2Len ? code2Len + " digits" : "Code 2"}" autocomplete="off"
+              inputmode="numeric" pattern="[0-9]*" ${code2Len ? 'maxlength="' + code2Len + '"' : ""}
               data-slot="${n}" data-field="code_2" />${revealBtn2}
           </div>
         </td>`;
@@ -851,6 +883,7 @@ class SlotSentryPanel extends HTMLElement {
           <div class="code-cell">
             <input class="slot-input" type="${revealed ? "text" : "password"}"
               placeholder="${singleLen ? singleLen + " digits" : "Code"}" autocomplete="off"
+              inputmode="numeric" pattern="[0-9]*" ${singleLen ? 'maxlength="' + singleLen + '"' : ""}
               data-slot="${n}" data-field="code_1" />${revealBtn}
           </div>
         </td>`;
@@ -867,7 +900,7 @@ class SlotSentryPanel extends HTMLElement {
             data-slot="${n}" data-field="enabled" ${vals.enabled ? "checked" : ""} />
         </td>
         <td>
-          <input class="slot-input" type="text" placeholder="Label"
+          <input class="slot-input" type="text" placeholder="Label" maxlength="24"
             data-slot="${n}" data-field="label" />
         </td>
         ${codeColumns}
@@ -986,7 +1019,14 @@ class SlotSentryPanel extends HTMLElement {
     root.addEventListener("input", (e) => {
       const inp = e.target;
       if (inp.dataset.slot && inp.dataset.field) {
-        this._onFieldInput(parseInt(inp.dataset.slot, 10), inp.dataset.field, inp.value);
+        const field = inp.dataset.field;
+        let value = inp.value;
+        // Strip non-digit characters from code fields in real time.
+        if (field === "code_1" || field === "code_2") {
+          value = value.replace(/\D/g, "");
+          if (value !== inp.value) inp.value = value;
+        }
+        this._onFieldInput(parseInt(inp.dataset.slot, 10), field, value);
       }
     });
 
