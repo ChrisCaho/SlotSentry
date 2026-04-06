@@ -365,6 +365,14 @@ class SlotManager:
         self._active_push_lock = None
         self._fire_push_status_event()
 
+    async def async_cancel_push(self) -> None:
+        """Cancel all running push tasks across all locks."""
+        _LOGGER.info("SlotManager: cancelling all push tasks")
+        for lock_entity, machine in self._machines.items():
+            await machine.async_cancel()
+        self._active_push_lock = None
+        self._fire_push_status_event()
+
     def clear_error_counters(self) -> None:
         """Reset session-only error and failure counters for all locks."""
         for lock_entity in self._error_counts:
@@ -468,6 +476,15 @@ class SlotManager:
             else:
                 overall = SYNC_SYNCED
 
+            # Get live operation from commit machine.
+            machine = self._machines.get(lock_entity)
+            current_op = None
+            current_slot = None
+            if machine is not None:
+                ms = machine.get_status()
+                current_op = ms.current_operation
+                current_slot = ms.current_slot
+
             result[lock_entity] = {
                 "state": overall,
                 "synced_count": synced,
@@ -478,6 +495,8 @@ class SlotManager:
                 "failed_slots": sorted(failed_slots),
                 "error_count": self._error_counts.get(lock_entity, 0),
                 "failure_count": self._failure_counts.get(lock_entity, 0),
+                "current_operation": current_op,
+                "current_slot": current_slot,
             }
 
         return result

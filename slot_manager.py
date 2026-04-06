@@ -476,6 +476,15 @@ class SlotManager:
             else:
                 overall = SYNC_SYNCED
 
+            # Get live operation from commit machine.
+            machine = self._machines.get(lock_entity)
+            current_op = None
+            current_slot = None
+            if machine is not None:
+                ms = machine.get_status()
+                current_op = ms.current_operation
+                current_slot = ms.current_slot
+
             result[lock_entity] = {
                 "state": overall,
                 "synced_count": synced,
@@ -486,6 +495,8 @@ class SlotManager:
                 "failed_slots": sorted(failed_slots),
                 "error_count": self._error_counts.get(lock_entity, 0),
                 "failure_count": self._failure_counts.get(lock_entity, 0),
+                "current_operation": current_op,
+                "current_slot": current_slot,
             }
 
         return result

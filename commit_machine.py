@@ -95,6 +95,7 @@ class LockPushStatus:
     failed_count: int
     uncertain_count: int
     current_slot: int | None    # Slot currently being pushed, or None
+    current_operation: str | None = None  # Human-readable status line
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +161,7 @@ class LockCommitMachine:
         # Internal machine state for get_status().
         self._machine_state: str = STATE_IDLE
         self._current_slot: int | None = None
+        self._current_operation: str | None = None
 
     def update_typical_latency(self, latency: float) -> None:
         """Update the profiled latency (called by LatencyProfiler)."""
@@ -231,6 +233,7 @@ class LockCommitMachine:
             self._task = None
             self._machine_state = STATE_IDLE
             self._current_slot = None
+            self._current_operation = None
 
     def get_status(self) -> LockPushStatus:
         """Return a snapshot of the current push status for this lock.
@@ -264,6 +267,7 @@ class LockCommitMachine:
             failed_count=failed,
             uncertain_count=uncertain,
             current_slot=self._current_slot,
+            current_operation=self._current_operation,
         )
 
     def reset_attempt_counters(self) -> None:
@@ -391,6 +395,7 @@ class LockCommitMachine:
                         consecutive_failures,
                         CONSECUTIVE_FAIL_COOLDOWN,
                     )
+                    self._current_operation = f"Pausing {CONSECUTIVE_FAIL_COOLDOWN:.0f}s after {consecutive_failures} failures"
                     await asyncio.sleep(CONSECUTIVE_FAIL_COOLDOWN)
                     consecutive_failures = 0
 
@@ -406,6 +411,7 @@ class LockCommitMachine:
                     adaptive_delay = max(base, self._last_call_elapsed / 5.0)
                     # Cap at a reasonable maximum.
                     adaptive_delay = min(adaptive_delay, 10.0)
+                    self._current_operation = f"Pacing delay {adaptive_delay:.1f}s"
                     _LOGGER.debug(
                         "LockCommitMachine[%s]: inter-slot delay %.1fs "
                         "(last call took %.1fs, typical=%.1fs)",
@@ -442,6 +448,7 @@ class LockCommitMachine:
             )
         finally:
             self._current_slot = None
+            self._current_operation = None
             self._machine_state = STATE_IDLE
 
         elapsed = time.monotonic() - push_start
@@ -490,6 +497,8 @@ class LockCommitMachine:
             attempt = self._attempt_counts.get(slot_number, 0) + 1
             self._attempt_counts[slot_number] = attempt
 
+            retry_label = f" retry {attempt}/{MAX_RETRIES}" if attempt > 1 else ""
+            self._current_operation = f"Slot {slot_number}: pushing{retry_label}"
             _LOGGER.info(
                 "LockCommitMachine[%s]: pushing slot %d (attempt %d/%d)",
                 self._lock_entity,
@@ -521,6 +530,7 @@ class LockCommitMachine:
                 await self._store.async_save()
 
                 result.synced += 1
+                self._current_operation = f"Slot {slot_number}: OK ({self._last_call_elapsed:.1f}s)"
                 _LOGGER.info(
                     "LockCommitMachine[%s]: slot %d synced successfully",
                     self._lock_entity,
@@ -550,6 +560,7 @@ class LockCommitMachine:
                 await self._store.async_save()
 
                 result.failed += 1
+                self._current_operation = f"Slot {slot_number}: FAILED after {attempt} attempts"
                 _LOGGER.warning(
                     "LockCommitMachine[%s]: slot %d FAILED after %d attempts",
                     self._lock_entity,
@@ -573,6 +584,7 @@ class LockCommitMachine:
             # failure, so use (attempt - 1) clamped to the tuple length.
             backoff_idx = min(attempt - 1, len(RETRY_BACKOFF) - 1)
             delay = RETRY_BACKOFF[backoff_idx]
+            self._current_operation = f"Slot {slot_number}: failed, retrying in {delay}s"
             _LOGGER.info(
                 "LockCommitMachine[%s]: slot %d will retry in %ds "
                 "(attempt %d/%d failed: %s)",
@@ -693,6 +705,7 @@ class LockCommitMachine:
         # code to flash before reading back — immediate reads can return the
         # old value, causing false mismatches and unnecessary retries.
         if self._backend.supports_readback:
+            self._current_operation = f"Slot {slot_number}: verifying"
             _LOGGER.debug(
                 "LockCommitMachine[%s]: slot %d waiting %.1fs before verify readback",
                 self._lock_entity,
@@ -730,6 +743,7 @@ class LockCommitMachine:
 
         if not self._backend.supports_readback:
             # No readback — simple clear, trust the result.
+            self._current_operation = f"Slot {slot_number}: clearing"
             _LOGGER.debug(
                 "LockCommitMachine[%s]: slot %d clearing (no readback)",
                 self._lock_entity,
@@ -744,6 +758,7 @@ class LockCommitMachine:
             return True, None
 
         # Readback-capable lock: robust clear sequence.
+        self._current_operation = f"Slot {slot_number}: robust clear"
         _LOGGER.info(
             "LockCommitMachine[%s]: slot %d robust clear "
             "(set temp → clear → verify)",

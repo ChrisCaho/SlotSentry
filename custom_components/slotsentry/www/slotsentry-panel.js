@@ -990,9 +990,14 @@ class SlotSentryPanel extends HTMLElement {
       failedSlotsHTML = '<div class="dirty-slots">Pending: ' + this._esc(shown + extra) + '</div>';
     }
 
-    const overlayHTML = isActive
-      ? '<div class="lock-card-overlay"><div class="spinner-cancel-wrap"><div class="spinner-ring"></div><button class="cancel-push-btn" data-action="cancel-push" title="Cancel push">\u2715</button></div><span>Pushing\u2026</span></div>'
-      : "";
+    let overlayHTML = "";
+    if (isActive) {
+      const op = info.current_operation || "";
+      const isErr = /fail|error/i.test(op);
+      const opClass = isErr ? "op-error" : "op-info";
+      const opLine = op ? '<div class="push-op-line ' + opClass + '">' + this._esc(op) + '</div>' : "";
+      overlayHTML = '<div class="lock-card-overlay"><div class="spinner-cancel-wrap"><div class="spinner-ring"></div><button class="cancel-push-btn" data-action="cancel-push" title="Cancel push">\u2715</button></div><span>Pushing\u2026</span>' + opLine + '</div>';
+    }
 
     return `
       <div class="lock-card ${this._esc(state)} ${isActive ? "pushing-active" : ""}">
@@ -1326,6 +1331,9 @@ class SlotSentryPanel extends HTMLElement {
       .spinner-ring { position: absolute; width: 48px; height: 48px; border: 3px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
       .cancel-push-btn { position: relative; z-index: 1; width: 32px; height: 32px; border: none; border-radius: 50%; background: var(--ss-danger, #e74c3c); color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0.85; transition: opacity 0.15s; padding: 0; line-height: 1; }
       .cancel-push-btn:hover { opacity: 1; }
+      .push-op-line { margin-top: 6px; font-size: 11px; max-width: 200px; text-align: center; line-height: 1.3; word-break: break-word; }
+      .push-op-line.op-info { color: #fff; }
+      .push-op-line.op-error { color: var(--ss-danger, #e74c3c); font-weight: 600; }
       @keyframes spin { to { transform: rotate(360deg); } }
 
       /* Toasts */
