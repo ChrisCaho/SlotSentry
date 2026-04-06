@@ -19,6 +19,7 @@
  *   slotsentry/push_lock   — push all dirty slots to one lock
  *   slotsentry/get_status  — per-lock sync summary
  *   slotsentry/clear_errors — clear error counters
+ *   slotsentry/cancel_push  — cancel running push
  */
 
 class SlotSentryPanel extends HTMLElement {
@@ -525,6 +526,25 @@ class SlotSentryPanel extends HTMLElement {
     }
   }
 
+  async _cancelPush() {
+    try {
+      await this._hass.callWS({
+        type: "slotsentry/cancel_push",
+        entry_id: this._entryId,
+      });
+      this._pushing = false;
+      this._pushProgress = "";
+      this._pushingLocks = {};
+      this._activePushLock = null;
+      this._stopPushPoll();
+      this._toast("Push cancelled.", "warning");
+      await this._loadStatus();
+    } catch (err) {
+      this._toast("Cancel failed: " + (err.message || err), "error");
+    }
+    this._scheduleRender();
+  }
+
   _startPushPoll() {
     if (this._pushPollId) return;
     this._pushPollStart = Date.now();
@@ -971,7 +991,7 @@ class SlotSentryPanel extends HTMLElement {
     }
 
     const overlayHTML = isActive
-      ? '<div class="lock-card-overlay"><div class="spinner"></div><span>Pushing\u2026</span></div>'
+      ? '<div class="lock-card-overlay"><div class="spinner-cancel-wrap"><div class="spinner-ring"></div><button class="cancel-push-btn" data-action="cancel-push" title="Cancel push">\u2715</button></div><span>Pushing\u2026</span></div>'
       : "";
 
     return `
@@ -1029,6 +1049,7 @@ class SlotSentryPanel extends HTMLElement {
       else if (action === "save-all") { this._saveAll(); }
       else if (action === "clear-errors") { this._clearErrors(); }
       else if (action === "show-errors") { window.alert(this._buildErrorSummary()); }
+      else if (action === "cancel-push") { this._cancelPush(); }
     });
 
     root.addEventListener("input", (e) => {
@@ -1301,6 +1322,10 @@ class SlotSentryPanel extends HTMLElement {
       .spinner { width: 24px; height: 24px; border: 3px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
       .spinner-sm { width: 14px; height: 14px; border: 2px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
       .spinner-xs { width: 12px; height: 12px; border: 2px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+      .spinner-cancel-wrap { position: relative; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; }
+      .spinner-ring { position: absolute; width: 48px; height: 48px; border: 3px solid var(--ss-border); border-top-color: var(--ss-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+      .cancel-push-btn { position: relative; z-index: 1; width: 32px; height: 32px; border: none; border-radius: 50%; background: var(--ss-danger, #e74c3c); color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0.85; transition: opacity 0.15s; padding: 0; line-height: 1; }
+      .cancel-push-btn:hover { opacity: 1; }
       @keyframes spin { to { transform: rotate(360deg); } }
 
       /* Toasts */

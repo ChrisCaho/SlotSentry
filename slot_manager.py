@@ -365,6 +365,14 @@ class SlotManager:
         self._active_push_lock = None
         self._fire_push_status_event()
 
+    async def async_cancel_push(self) -> None:
+        """Cancel all running push tasks across all locks."""
+        _LOGGER.info("SlotManager: cancelling all push tasks")
+        for lock_entity, machine in self._machines.items():
+            await machine.async_cancel()
+        self._active_push_lock = None
+        self._fire_push_status_event()
+
     def clear_error_counters(self) -> None:
         """Reset session-only error and failure counters for all locks."""
         for lock_entity in self._error_counts:

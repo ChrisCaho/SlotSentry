@@ -52,6 +52,7 @@ from .const import (
     WS_PUSH_ALL,
     WS_PUSH_LOCK,
     WS_CLEAR_ERRORS,
+    WS_CANCEL_PUSH,
     WS_PROFILE_LATENCY,
     WS_SECURE_STATUS,
     WS_SET_SLOT,
@@ -499,6 +500,47 @@ async def ws_push_lock(
 
 
 # ---------------------------------------------------------------------------
+# WS command: cancel_push
+# ---------------------------------------------------------------------------
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_CANCEL_PUSH,
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_cancel_push(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Cancel all running push tasks.
+
+    WebSocket command: ``slotsentry/cancel_push``
+
+    Cancels any in-progress push across all locks.  The commit machines
+    will stop at the next safe point and report partial results.
+
+    Request fields:
+        entry_id (str): The config entry ID.
+    """
+    slot_manager = _get_slot_manager(hass, connection, msg)
+    if slot_manager is None:
+        return
+
+    await slot_manager.async_cancel_push()
+
+    connection.send_result(msg["id"], {"success": True})
+    _LOGGER.info(
+        "ws_cancel_push: push cancelled for entry %s",
+        msg["entry_id"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # WS command: get_status
 # ---------------------------------------------------------------------------
 
@@ -898,6 +940,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_delete_slot)
     websocket_api.async_register_command(hass, ws_push_all)
     websocket_api.async_register_command(hass, ws_push_lock)
+    websocket_api.async_register_command(hass, ws_cancel_push)
     websocket_api.async_register_command(hass, ws_get_status)
     websocket_api.async_register_command(hass, ws_unlock)
     websocket_api.async_register_command(hass, ws_lock)
@@ -907,7 +950,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
 
     _LOGGER.debug(
         "SlotSentry: registered %d WebSocket command(s): %s",
-        12,
+        13,
         ", ".join(
             [
                 WS_GET_CONFIG,
@@ -916,6 +959,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
                 WS_DELETE_SLOT,
                 WS_PUSH_ALL,
                 WS_PUSH_LOCK,
+                WS_CANCEL_PUSH,
                 WS_GET_STATUS,
                 WS_UNLOCK,
                 WS_LOCK,
