@@ -791,6 +791,41 @@ The `SlotManager` is responsible for constructing `SlotInfo` from slot data befo
 
 ---
 
+### Task 3.4 — Independent Lock Mode
+
+**Complexity:** L
+**Depends on:** Phase 2 complete, Task 3.1
+
+**Context:** SlotSentry currently operates in **group mode** — all locks share the same slot grid, same code slots, same push. This is ideal for households where every lock should have the same codes. However, many users want **independent lock mode** where each lock has its own slot grid with its own codes, labels, and enable states. For example: front door has 10 codes, garage has 3 codes, office has 5 different codes.
+
+**Deliverables:**
+- Config flow adds a **management mode** choice: "Group" (current behavior) or "Independent"
+- In independent mode:
+  - Storage schema uses per-lock slot arrays: `slots.<lock_entity_id>.{slot_number: SlotData}`
+  - Each lock has its own slot count (from its own `code_slot_count` attribute)
+  - Panel shows a tab or dropdown per lock, each with its own slot grid
+  - Push operations apply only to the selected lock's slots
+  - Code lengths are per-lock (already supported via `per_lock_code_length`)
+- In group mode: behavior is unchanged (shared slot grid, all locks get same codes)
+- Migration path: switching from group → independent copies the shared slots to each lock; switching independent → group merges (or asks user to pick a source lock)
+
+**Design considerations:**
+- Storage schema change: `slots` key becomes either `dict[str, SlotData]` (group) or `dict[str, dict[str, SlotData]]` (independent, keyed by lock entity)
+- `SlotManager` needs mode-aware methods: `get_slots(lock_entity=None)` returns shared slots in group mode, per-lock slots in independent mode
+- `commit_machine.py` is unaffected — it already operates per-lock
+- Panel needs significant rework: tab/dropdown for lock selection, per-lock slot grids
+- Latency profiling, keypad lockout, secure mode all work per-lock already
+
+**Checklist:**
+- [ ] Config flow offers Group vs Independent mode choice
+- [ ] Independent mode: each lock has its own slot grid in storage
+- [ ] Panel shows lock selector and per-lock slot grid in independent mode
+- [ ] Push only affects the selected lock's slots
+- [ ] Mode switch (group ↔ independent) handles data migration gracefully
+- [ ] Group mode behavior is 100% unchanged (no regression)
+
+---
+
 ## Dependency Graph
 
 ```
@@ -814,7 +849,8 @@ Phase 2 (all depend on Phase 1 complete):
 Phase 3 (all depend on Phase 2 complete):
     ├── Task 3.1 (LockBackend Protocol) — refactor of Task 1.8
     ├── Task 3.2 (Temporary Codes)      — depends on Phase 2 complete
-    └── Task 3.3 (HACS Packaging)       — depends on Phase 2 complete
+    ├── Task 3.3 (HACS Packaging)       — depends on Phase 2 complete
+    └── Task 3.4 (Independent Lock Mode) — depends on Task 3.1
 ```
 
 **Critical path:** 1.1 → 1.2 → 1.3 → 1.4 → 1.7 → panel demo
