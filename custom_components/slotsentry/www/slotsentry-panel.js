@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a18
+ * Version: 2026.4.0a19
  * Revision: 3.0
  *
  * Copyright (c) 2026 Chris Caho
@@ -753,7 +753,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a18";
+    const version = "v2026.4.0a19";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Check if any errors exist for the Clear Errors button
@@ -815,7 +815,8 @@ class SlotSentryPanel extends HTMLElement {
           </div>
         </div>
 
-        <p class="section-title" style="margin-top:28px;">Lock Status</p>
+        <hr class="section-divider" />
+        <p class="section-title" style="margin-top:16px;">Lock Status</p>
         ${this._renderStatusSectionHTML()}
       </div>
     ` + this._renderToastsHTML();
@@ -1197,6 +1198,10 @@ class SlotSentryPanel extends HTMLElement {
       .section-title {
         font-size: 15px; font-weight: 500; margin: 0 0 10px 0;
         color: var(--secondary-text-color, #727272);
+      }
+      .section-divider {
+        border: none; border-top: 1px solid var(--divider-color, #e0e0e0);
+        margin: 28px 0 0 0;
       }
 
       /* Slot table card */

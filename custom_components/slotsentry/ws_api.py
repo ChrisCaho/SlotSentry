@@ -488,12 +488,12 @@ async def ws_push_lock(
         return
 
     hass.async_create_task(
-        slot_manager.async_push_lock(lock_entity=lock_entity)
+        slot_manager.async_push_lock(lock_entity=lock_entity, force=True)
     )
 
     connection.send_result(msg["id"], {"success": True})
-    _LOGGER.debug(
-        "ws_push_lock: push to '%s' initiated (fire-and-forget) for entry %s",
+    _LOGGER.info(
+        "ws_push_lock: force-push to '%s' initiated for entry %s",
         lock_entity,
         msg["entry_id"],
     )

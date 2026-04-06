@@ -360,11 +360,27 @@ class SlotManager:
         self._active_push_lock = None
         self._fire_push_status_event()
 
-    async def async_push_lock(self, lock_entity: str) -> None:
-        """Push all dirty slots to a single lock."""
+    async def async_push_lock(self, lock_entity: str, force: bool = False) -> None:
+        """Push slots to a single lock.
+
+        Args:
+            lock_entity: The lock to push to.
+            force: If True, mark ALL slots dirty for this lock first so every
+                   slot is pushed (set codes where data exists, clear empties).
+                   If False, only push slots already marked out_of_sync.
+        """
         machine = self._machines.get(lock_entity)
         if machine is None:
             raise KeyError(f"No backend configured for lock '{lock_entity}'")
+
+        if force:
+            # Mark every slot dirty for this lock so the push loop processes all.
+            machine.reset_attempt_counters()
+            for sn in range(1, self.slot_count + 1):
+                commit = self._store.get_lock_commit(lock_entity, sn)
+                commit.state = SYNC_OUT_OF_SYNC
+                self._store.set_lock_commit(lock_entity, commit)
+            _LOGGER.info("Force-push: marked all %d slots dirty for %s", self.slot_count, lock_entity)
 
         self._active_push_lock = lock_entity
         self._fire_push_status_event()
