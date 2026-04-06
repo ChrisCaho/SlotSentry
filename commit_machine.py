@@ -148,9 +148,8 @@ class LockCommitMachine:
         # asyncio.Task for the current push run, or None when idle.
         self._task: asyncio.Task | None = None
 
-        # Per-lock mutex — prevents overlapping pushes to the same lock
-        # (e.g., push_lock called while push_all is already running).
-        self._push_lock = asyncio.Lock()
+        # Busy flag — rejects overlapping pushes instead of queueing.
+        self._busy: bool = False
 
         # Per-slot retry counters.  Keys are slot numbers (int).
         self._attempt_counts: dict[int, int] = {}
@@ -165,6 +164,11 @@ class LockCommitMachine:
         self._machine_state: str = STATE_IDLE
         self._current_slot: int | None = None
         self._current_operation: str | None = None
+
+    @property
+    def is_busy(self) -> bool:
+        """True if a push is currently running on this lock."""
+        return self._busy
 
     def update_typical_latency(self, latency: float) -> None:
         """Update the profiled latency (called by LatencyProfiler)."""
@@ -234,6 +238,7 @@ class LockCommitMachine:
             pass
         finally:
             self._task = None
+            self._busy = False
             self._machine_state = STATE_IDLE
             self._current_slot = None
             self._current_operation = None
@@ -296,15 +301,11 @@ class LockCommitMachine:
         code_length_1: int | None,
         code_length_2: int | None,
         lock_code_length: int | None = None,
-    ) -> PushResult:
+    ) -> PushResult | None:
         """Push all dirty slots for this lock to the physical hardware.
 
-        Iterates *slots* in ascending slot-number order. For each slot that
-        is marked out_of_sync (or uncertain) in storage, the appropriate code
-        is selected, pushed, optionally verified, and the commit state is
-        persisted.  Slots that are already synced are skipped.
-
-        All exceptions are caught internally; this coroutine never raises.
+        Rejects immediately if a push is already running on this lock.
+        Returns None if rejected (lock busy).
 
         Args:
             slots:             All slot data for this config entry.
@@ -314,19 +315,23 @@ class LockCommitMachine:
             lock_code_length:  Code length assigned to this lock.
 
         Returns:
-            PushResult summary for the whole lock.
+            PushResult summary, or None if the lock was busy.
         """
-        # Acquire per-lock mutex to prevent overlapping pushes.
-        if self._push_lock.locked():
+        if self._busy:
             _LOGGER.warning(
-                "LockCommitMachine[%s]: push already in progress — waiting for lock",
+                "LockCommitMachine[%s]: push rejected — lock is busy",
                 self._lock_entity,
             )
-        async with self._push_lock:
+            return None
+
+        self._busy = True
+        try:
             return await self._do_push_dirty_slots(
                 slots, code_length_mode, code_length_1, code_length_2,
                 lock_code_length,
             )
+        finally:
+            self._busy = False
 
     async def _do_push_dirty_slots(
         self,

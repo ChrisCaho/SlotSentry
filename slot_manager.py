@@ -86,6 +86,9 @@ class SlotManager:
         self._profiler = LatencyProfiler(backends)
         self._latency_profiles: dict[str, LatencyProfile] = {}
 
+        # Tracked push tasks (for cancel support).
+        self._push_tasks: list[asyncio.Task] = []
+
         # Session-only counters (reset on HA restart).
         self._error_counts: dict[str, int] = {}    # lock_entity → count
         self._failure_counts: dict[str, int] = {}   # lock_entity → count
@@ -156,13 +159,15 @@ class SlotManager:
                         self._store.set_lock_commit(lock_entity, commit)
 
         # Auto-clear stale FAILED/RETRY states from previous sessions.
-        # On restart, these should revert to out_of_sync so next push retries them
-        # (same behaviour as the Clear Errors button).
+        # On restart, these should revert to pending (out_of_sync with no
+        # pushed_at) so next push retries them cleanly.
         for lock_entity in self._backends:
             commits = self._store.get_all_lock_commits(lock_entity)
             for sn, commit in commits.items():
                 if commit.state in (STATE_FAILED, STATE_RETRY):
                     commit.state = SYNC_OUT_OF_SYNC
+                    commit.pushed_at = None
+                    commit.code_hash = None
                     self._store.set_lock_commit(lock_entity, commit)
 
         # Load latency profiles from storage.
@@ -326,6 +331,15 @@ class SlotManager:
 
         lock_count = 0
         for lock_entity, machine in self._machines.items():
+            # Skip locks that are already being pushed (e.g., a Push Lock
+            # is running on this lock from a separate request).
+            if machine.is_busy:
+                _LOGGER.info(
+                    "SlotManager: skipping %s — already busy",
+                    lock_entity,
+                )
+                continue
+
             # Inter-lock delay — give the Z-Wave mesh breathing room
             # between finishing one lock and starting the next.
             if lock_count > 0:
@@ -368,10 +382,19 @@ class SlotManager:
             force: If True, mark ALL slots dirty for this lock first so every
                    slot is pushed (set codes where data exists, clear empties).
                    If False, only push slots already marked out_of_sync.
+
+        Raises:
+            RuntimeError: If the lock is already being pushed.
         """
         machine = self._machines.get(lock_entity)
         if machine is None:
             raise KeyError(f"No backend configured for lock '{lock_entity}'")
+
+        if machine.is_busy:
+            raise RuntimeError(
+                f"Lock '{lock_entity}' is already being pushed — "
+                f"cancel the current push first or wait for it to finish"
+            )
 
         if force:
             # Mark every slot dirty for this lock so the push loop processes all.
@@ -403,11 +426,32 @@ class SlotManager:
         self._active_push_lock = None
         self._fire_push_status_event()
 
+    def register_push_task(self, task: asyncio.Task) -> None:
+        """Track a fire-and-forget push task so cancel can find it."""
+        self._push_tasks.append(task)
+        # Auto-clean completed tasks.
+        self._push_tasks = [t for t in self._push_tasks if not t.done()]
+
     async def async_cancel_push(self) -> None:
         """Cancel all running push tasks across all locks."""
         _LOGGER.info("SlotManager: cancelling all push tasks")
+
+        # Cancel tracked fire-and-forget tasks (push_all / push_lock).
+        for task in self._push_tasks:
+            if not task.done():
+                task.cancel()
+        for task in self._push_tasks:
+            if not task.done():
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+        self._push_tasks.clear()
+
+        # Also cancel any tasks stored on the commit machines themselves.
         for lock_entity, machine in self._machines.items():
             await machine.async_cancel()
+
         self._active_push_lock = None
         self._fire_push_status_event()
 
@@ -425,11 +469,14 @@ class SlotManager:
 
         for lock_entity, machine in self._machines.items():
             machine.reset_attempt_counters()
-            # Reset FAILED commits back to out_of_sync so they'll be retried.
+            # Reset FAILED commits back to out_of_sync with cleared pushed_at
+            # so they show as "pending" (retryable) not "failed" in the UI.
             commits = self._store.get_all_lock_commits(lock_entity)
             for sn, commit in commits.items():
-                if commit.state == STATE_FAILED:
+                if commit.state in (STATE_FAILED, STATE_RETRY):
                     commit.state = SYNC_OUT_OF_SYNC
+                    commit.pushed_at = None
+                    commit.code_hash = None
                     self._store.set_lock_commit(lock_entity, commit)
 
         self._fire_push_status_event()

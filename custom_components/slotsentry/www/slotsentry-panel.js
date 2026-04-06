@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a19
+ * Version: 2026.4.0a20
  * Revision: 3.0
  *
  * Copyright (c) 2026 Chris Caho
@@ -753,7 +753,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a19";
+    const version = "v2026.4.0a20";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Check if any errors exist for the Clear Errors button
@@ -1200,8 +1200,8 @@ class SlotSentryPanel extends HTMLElement {
         color: var(--secondary-text-color, #727272);
       }
       .section-divider {
-        border: none; border-top: 1px solid var(--divider-color, #e0e0e0);
-        margin: 28px 0 0 0;
+        border: none; border-top: 2px solid var(--secondary-text-color, #727272);
+        margin: 28px 0 0 0; opacity: 0.5;
       }
 
       /* Slot table card */

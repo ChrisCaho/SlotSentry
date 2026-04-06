@@ -417,7 +417,8 @@ async def ws_push_all(
     if slot_manager is None:
         return
 
-    hass.async_create_task(slot_manager.async_push_all())
+    task = hass.async_create_task(slot_manager.async_push_all())
+    slot_manager.register_push_task(task)
 
     connection.send_result(msg["id"], {"success": True})
     _LOGGER.debug(
@@ -487,9 +488,21 @@ async def ws_push_lock(
         )
         return
 
-    hass.async_create_task(
+    # Check if lock is already busy.
+    machine = slot_manager._machines.get(lock_entity)
+    if machine and machine.is_busy:
+        connection.send_error(
+            msg["id"],
+            "lock_busy",
+            f"Lock '{lock_entity}' is already being pushed — "
+            f"cancel the current push first or wait for it to finish",
+        )
+        return
+
+    task = hass.async_create_task(
         slot_manager.async_push_lock(lock_entity=lock_entity, force=True)
     )
+    slot_manager.register_push_task(task)
 
     connection.send_result(msg["id"], {"success": True})
     _LOGGER.info(
