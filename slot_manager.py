@@ -166,8 +166,6 @@ class SlotManager:
             for sn, commit in commits.items():
                 if commit.state in (STATE_FAILED, STATE_RETRY):
                     commit.state = SYNC_OUT_OF_SYNC
-                    commit.pushed_at = None
-                    commit.code_hash = None
                     self._store.set_lock_commit(lock_entity, commit)
 
         # Load latency profiles from storage.
@@ -469,14 +467,12 @@ class SlotManager:
 
         for lock_entity, machine in self._machines.items():
             machine.reset_attempt_counters()
-            # Reset FAILED commits back to out_of_sync with cleared pushed_at
-            # so they show as "pending" (retryable) not "failed" in the UI.
+            # Reset FAILED commits back to out_of_sync so next push retries.
+            # Keep pushed_at/code_hash intact — they record what was attempted.
             commits = self._store.get_all_lock_commits(lock_entity)
             for sn, commit in commits.items():
                 if commit.state in (STATE_FAILED, STATE_RETRY):
                     commit.state = SYNC_OUT_OF_SYNC
-                    commit.pushed_at = None
-                    commit.code_hash = None
                     self._store.set_lock_commit(lock_entity, commit)
 
         self._fire_push_status_event()
@@ -559,11 +555,7 @@ class SlotManager:
                     dirty.append(sn)
                     failed_slots.append(sn)
                 elif commit.state == SYNC_OUT_OF_SYNC:
-                    if commit.pushed_at is None:
-                        pending += 1
-                    else:
-                        failed += 1
-                        failed_slots.append(sn)
+                    pending += 1
                     dirty.append(sn)
                 elif commit.state == SYNC_UNCERTAIN:
                     uncertain += 1
