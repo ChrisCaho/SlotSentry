@@ -9,7 +9,7 @@ Revision: 1.3
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a17"
+VERSION = "2026.4.0a18"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 2
@@ -29,8 +29,12 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = (5, 15, 30)  # Seconds between retries
 
 # Z-Wave pacing — prevents mesh congestion and lock buffer overflow
-INTER_SLOT_DELAY = 2.0       # Seconds between successful slot pushes to same lock
-INTER_LOCK_DELAY = 3.0       # Seconds between finishing one lock and starting the next
+INTER_SLOT_DELAY = 2.0       # Fallback inter-slot delay when no latency profile exists
+INTER_LOCK_DELAY = 3.0       # Fallback inter-lock delay when no latency profile exists
+LATENCY_SLOT_MULTIPLIER = 1.5   # Inter-slot delay = typical_latency × this
+LATENCY_LOCK_MULTIPLIER = 3.0   # Inter-lock delay = max(typical_latencies) × this
+LATENCY_ERROR_RAMP = 0.5        # Per consecutive error: multiply base by (1 + N × this)
+MIN_INTER_SLOT_DELAY = 0.3      # Absolute floor for inter-slot delay (seconds)
 VERIFY_SETTLE_DELAY = 1.5    # Seconds after set before readback verification
 CONSECUTIVE_FAIL_PAUSE = 3   # After N consecutive slot failures, pause the lock
 CONSECUTIVE_FAIL_COOLDOWN = 30.0  # Seconds to pause after consecutive failures

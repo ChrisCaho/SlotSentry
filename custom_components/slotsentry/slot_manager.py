@@ -33,6 +33,7 @@ from .const import (
     CONF_SLOT_COUNT,
     EVENT_PUSH_STATUS_CHANGED,
     INTER_LOCK_DELAY,
+    LATENCY_LOCK_MULTIPLIER,
     STATE_FAILED,
     STATE_RETRY,
     SYNC_OUT_OF_SYNC,
@@ -153,6 +154,16 @@ class SlotManager:
                     if commit.state != SYNC_SYNCED:
                         commit.state = SYNC_SYNCED
                         self._store.set_lock_commit(lock_entity, commit)
+
+        # Auto-clear stale FAILED/RETRY states from previous sessions.
+        # On restart, these should revert to out_of_sync so next push retries them
+        # (same behaviour as the Clear Errors button).
+        for lock_entity in self._backends:
+            commits = self._store.get_all_lock_commits(lock_entity)
+            for sn, commit in commits.items():
+                if commit.state in (STATE_FAILED, STATE_RETRY):
+                    commit.state = SYNC_OUT_OF_SYNC
+                    self._store.set_lock_commit(lock_entity, commit)
 
         # Load latency profiles from storage.
         raw_profiles = self._store.get_all_latency_profiles()
@@ -302,17 +313,28 @@ class SlotManager:
         cl2 = self.code_length_2
         plcl = self.per_lock_code_length
 
+        # Compute latency-based inter-lock delay.
+        latencies = [
+            p.typical_latency
+            for p in self._latency_profiles.values()
+            if p.typical_latency is not None
+        ]
+        if latencies:
+            inter_lock = max(latencies) * LATENCY_LOCK_MULTIPLIER
+        else:
+            inter_lock = INTER_LOCK_DELAY
+
         lock_count = 0
         for lock_entity, machine in self._machines.items():
             # Inter-lock delay — give the Z-Wave mesh breathing room
             # between finishing one lock and starting the next.
             if lock_count > 0:
                 _LOGGER.info(
-                    "SlotManager: inter-lock delay %.0fs before %s",
-                    INTER_LOCK_DELAY,
+                    "SlotManager: inter-lock delay %.1fs before %s",
+                    inter_lock,
                     lock_entity,
                 )
-                await asyncio.sleep(INTER_LOCK_DELAY)
+                await asyncio.sleep(inter_lock)
 
             self._active_push_lock = lock_entity
             self._fire_push_status_event()

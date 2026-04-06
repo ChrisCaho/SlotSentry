@@ -32,7 +32,10 @@ from .const import (
     CONSECUTIVE_FAIL_COOLDOWN,
     CONSECUTIVE_FAIL_PAUSE,
     INTER_SLOT_DELAY,
+    LATENCY_ERROR_RAMP,
+    LATENCY_SLOT_MULTIPLIER,
     MAX_RETRIES,
+    MIN_INTER_SLOT_DELAY,
     RETRY_BACKOFF,
     STATE_FAILED,
     STATE_IDLE,
@@ -399,26 +402,32 @@ class LockCommitMachine:
                     await asyncio.sleep(CONSECUTIVE_FAIL_COOLDOWN)
                     consecutive_failures = 0
 
-                # Adaptive inter-slot delay — give the Z-Wave mesh and lock
-                # breathing room.  Combines a proactive baseline from latency
-                # profiling with a reactive adjustment from the last call.
+                # Adaptive inter-slot delay — uses discovered latency as the
+                # baseline (not a conservative constant).  Ramps up on errors.
                 if slots_actually_pushed > 0:
-                    # Proactive: use profiled latency as baseline (if available).
-                    base = INTER_SLOT_DELAY
                     if self._typical_latency is not None:
-                        base = max(base, self._typical_latency * 1.5)
-                    # Reactive: stretch if last call was slow.
+                        # Latency-driven: use discovered latency as baseline.
+                        base = self._typical_latency * LATENCY_SLOT_MULTIPLIER
+                        # Ramp up on consecutive errors.
+                        if consecutive_failures > 0:
+                            base *= (1.0 + consecutive_failures * LATENCY_ERROR_RAMP)
+                    else:
+                        # No latency data — fall back to conservative constant.
+                        base = INTER_SLOT_DELAY
+                    # Reactive: stretch if last call was unusually slow.
                     adaptive_delay = max(base, self._last_call_elapsed / 5.0)
-                    # Cap at a reasonable maximum.
+                    # Floor and cap.
+                    adaptive_delay = max(adaptive_delay, MIN_INTER_SLOT_DELAY)
                     adaptive_delay = min(adaptive_delay, 10.0)
                     self._current_operation = f"Pacing delay {adaptive_delay:.1f}s"
                     _LOGGER.debug(
                         "LockCommitMachine[%s]: inter-slot delay %.1fs "
-                        "(last call took %.1fs, typical=%.1fs)",
+                        "(last call took %.1fs, typical=%.1fs, consec_errors=%d)",
                         self._lock_entity,
                         adaptive_delay,
                         self._last_call_elapsed,
                         self._typical_latency or 0.0,
+                        consecutive_failures,
                     )
                     await asyncio.sleep(adaptive_delay)
 
