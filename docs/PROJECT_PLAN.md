@@ -791,38 +791,102 @@ The `SlotManager` is responsible for constructing `SlotInfo` from slot data befo
 
 ---
 
-### Task 3.4 — Independent Lock Mode
+### Task 3.4 — Management Mode Selection (Group / Independent / Lead Lock)
 
-**Complexity:** L
+**Complexity:** XL
 **Depends on:** Phase 2 complete, Task 3.1
 
-**Context:** SlotSentry currently operates in **group mode** — all locks share the same slot grid, same code slots, same push. This is ideal for households where every lock should have the same codes. However, many users want **independent lock mode** where each lock has its own slot grid with its own codes, labels, and enable states. For example: front door has 10 codes, garage has 3 codes, office has 5 different codes.
+**Context:** SlotSentry currently operates in a single mode — **group mode** — where all locks share the same slot grid and receive the same codes. Phase 3 introduces a **management mode** config flow choice offering three modes, each serving a different use case.
 
-**Deliverables:**
-- Config flow adds a **management mode** choice: "Group" (current behavior) or "Independent"
-- In independent mode:
-  - Storage schema uses per-lock slot arrays: `slots.<lock_entity_id>.{slot_number: SlotData}`
-  - Each lock has its own slot count (from its own `code_slot_count` attribute)
-  - Panel shows a tab or dropdown per lock, each with its own slot grid
-  - Push operations apply only to the selected lock's slots
-  - Code lengths are per-lock (already supported via `per_lock_code_length`)
-- In group mode: behavior is unchanged (shared slot grid, all locks get same codes)
-- Migration path: switching from group → independent copies the shared slots to each lock; switching independent → group merges (or asks user to pick a source lock)
+---
+
+#### Mode A: Group Mode (current default)
+
+Unchanged from today. All locks share one slot grid. Save → push to all locks. Best for households where every door should have identical codes.
+
+---
+
+#### Mode B: Independent Lock Mode
+
+Each lock has its own slot grid with its own codes, labels, and enable states. Front door can have 10 codes while garage has 3 completely different codes. Best for mixed-use properties, Airbnb hosts with per-unit locks, or any scenario where locks need different code sets.
+
+**Behavior:**
+- Storage uses per-lock slot arrays: `slots.<lock_entity_id>.{slot_number: SlotData}`
+- Each lock keeps its own slot count (from its hardware `code_slot_count`)
+- Panel shows a tab or dropdown per lock, each with its own independent slot grid
+- Push operations apply only to the selected lock's slots
+- Code lengths are per-lock (already supported via `per_lock_code_length`)
 
 **Design considerations:**
-- Storage schema change: `slots` key becomes either `dict[str, SlotData]` (group) or `dict[str, dict[str, SlotData]]` (independent, keyed by lock entity)
-- `SlotManager` needs mode-aware methods: `get_slots(lock_entity=None)` returns shared slots in group mode, per-lock slots in independent mode
-- `commit_machine.py` is unaffected — it already operates per-lock
-- Panel needs significant rework: tab/dropdown for lock selection, per-lock slot grids
-- Latency profiling, keypad lockout, secure mode all work per-lock already
+- `SlotManager` needs mode-aware methods: `get_slots(lock_entity=None)` returns shared slots in group, per-lock slots in independent
+- `commit_machine.py` is unaffected — already operates per-lock
+- Panel needs significant rework: lock selector tab bar, per-lock grids
+- Migration: group → independent copies shared slots to each lock; independent → group asks user to pick a source lock
+
+---
+
+#### Mode C: Lead Lock Mode
+
+Like group mode (shared slot grid, all locks get the same codes), but one lock is designated the **lead lock**. SlotSentry monitors the lead lock for code changes made outside the panel (e.g., programmed at the keypad, changed via another integration, or set by a property manager). When a change is detected on the lead lock, SlotSentry automatically propagates it to all other managed locks.
+
+**Use case:** A rental property manager programs codes directly on the front door deadbolt (the lead lock). SlotSentry detects the new code and pushes it to the back door, garage, and utility room locks automatically — no need to open the panel.
+
+**Behavior:**
+- Config flow designates one lock as the lead lock (dropdown from managed locks)
+- **Lead lock constraint:** In single code length mode, the lead lock can be any managed lock. In dual code length mode, the lead lock **must** be a lock assigned the longer code length (`code_length_2`). This is because the propagation strategy truncates the lead lock's code to derive the shorter code.
+- SlotSentry periodically polls the lead lock's code slots (configurable interval, default every 5 minutes) using `async_get_usercode` readback
+- On detecting a change (code added, modified, or cleared on the lead lock):
+  1. Update the SlotSentry storage to match the lead lock's state
+  2. In dual mode: the lead lock's full code becomes `code_2` (long code); the first N digits become `code_1` (short code), where N = `code_length_1`
+  3. Mark all other locks as out_of_sync for the affected slots
+  4. Trigger a push to propagate the change to all follower locks
+  5. Fire an audit event: `lead_lock_change_detected` with slot number and action (set/clear)
+- The lead lock's codes are the **source of truth** — if someone edits a code in the panel AND on the lead lock simultaneously, the lead lock wins on next poll
+- Lead lock changes detected via panel edits still work normally (save → push to all)
+
+**Lead lock requirements:**
+- Must support code readback (`supports_readback = True`). Locks that return asterisks (e.g., FE599) cannot be lead locks.
+- In dual mode, must be assigned the longer code length
+
+**Code truncation example (dual mode):**
+- Lead lock has code length 6, follower locks have code length 4
+- User programs `123456` on the lead lock's slot 5
+- SlotSentry detects: `code_2 = "123456"`, derives `code_1 = "1234"` (first 4 digits)
+- Pushes `123456` to other 6-digit locks, `1234` to 4-digit locks
+
+**Polling strategy:**
+- Default: poll lead lock every 5 minutes (`LEAD_LOCK_POLL_INTERVAL = 300`)
+- Poll is a sequential readback of all active slots (reuses existing `async_get_usercode`)
+- Inter-slot delay applies (uses latency profiling data)
+- Poll skipped if a push is currently in progress on the lead lock
+- Configurable: user can increase/decrease interval in config flow options
+
+**New config keys:**
+- `CONF_MANAGEMENT_MODE`: `"group"` | `"independent"` | `"lead_lock"`
+- `CONF_LEAD_LOCK_ENTITY`: entity_id of the lead lock
+- `CONF_LEAD_LOCK_POLL_INTERVAL`: seconds between polls (default 300)
 
 **Checklist:**
-- [ ] Config flow offers Group vs Independent mode choice
-- [ ] Independent mode: each lock has its own slot grid in storage
-- [ ] Panel shows lock selector and per-lock slot grid in independent mode
-- [ ] Push only affects the selected lock's slots
-- [ ] Mode switch (group ↔ independent) handles data migration gracefully
-- [ ] Group mode behavior is 100% unchanged (no regression)
+- [ ] Config flow offers Group / Independent / Lead Lock mode choice
+- [ ] Lead lock dropdown only shows readback-capable locks
+- [ ] In dual mode, lead lock dropdown only shows locks with the longer code length
+- [ ] Periodic poll detects added, changed, and cleared codes on lead lock
+- [ ] Detected changes propagate to all follower locks automatically
+- [ ] Dual mode truncation: lead lock's full code → short code uses first N digits
+- [ ] Lead lock changes override panel edits on conflict (lead lock is source of truth)
+- [ ] Audit events fired for all lead lock change detections
+- [ ] Poll respects latency profiling and inter-slot delay
+- [ ] Poll skipped during active push operations
+- [ ] Panel shows lead lock indicator badge and last-poll timestamp
+
+---
+
+**Shared deliverables across all three modes:**
+- Config flow adds **management mode** selector on a new step after lock selection
+- `CONF_MANAGEMENT_MODE` stored in config entry (default `"group"` for backwards compatibility)
+- `SlotManager` becomes mode-aware; all existing group-mode behavior preserved exactly
+- Migration path between modes handled via reconfigure flow with data migration warnings
+- All modes support: latency profiling, keypad lockout, secure mode, push status tracking
 
 ---
 
@@ -850,7 +914,9 @@ Phase 3 (all depend on Phase 2 complete):
     ├── Task 3.1 (LockBackend Protocol) — refactor of Task 1.8
     ├── Task 3.2 (Temporary Codes)      — depends on Phase 2 complete
     ├── Task 3.3 (HACS Packaging)       — depends on Phase 2 complete
-    └── Task 3.4 (Independent Lock Mode) — depends on Task 3.1
+    └── Task 3.4 (Management Modes)     — depends on Task 3.1
+        ├── Mode B (Independent Lock)   — storage + panel rework
+        └── Mode C (Lead Lock)          — polling + truncation + audit
 ```
 
 **Critical path:** 1.1 → 1.2 → 1.3 → 1.4 → 1.7 → panel demo
