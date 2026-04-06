@@ -264,6 +264,11 @@ class ZWaveJSBackend:
         self._entity_id = entity_id
         self._supports_readback: bool = False
         self._supported_code_lengths: tuple[int, int] = _DEFAULT_CODE_LENGTH_RANGE
+        # Slots known to be missing from Z-Wave JS ValueDB (node cache).
+        # Once a slot triggers "not found", we go straight to CC API on
+        # subsequent attempts instead of wasting time on the high-level
+        # service that will just fail again.
+        self._uncached_slots: set[int] = set()
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -407,6 +412,17 @@ class ZWaveJSBackend:
             True on success, False on any exception (service error,
             entity unavailable, timeout, etc.).
         """
+        # If this slot is known to be missing from the node cache, skip
+        # the high-level service and go straight to CC API.
+        if slot_info.slot_number in self._uncached_slots:
+            _LOGGER.info(
+                "ZWaveJSBackend.async_set_usercode: slot %d known uncached "
+                "for %s — using CC API directly",
+                slot_info.slot_number,
+                self._entity_id,
+            )
+            return await self._async_set_usercode_cc_api(slot_info, code)
+
         service_data: dict[str, Any] = {
             "entity_id": self._entity_id,
             "code_slot": slot_info.slot_number,
@@ -439,8 +455,9 @@ class ZWaveJSBackend:
         except Exception as ex:  # noqa: BLE001
             elapsed = time.monotonic() - t0
             # Check if this is a "slot not found in cache" error.
-            # If so, fall back to direct CC API which bypasses the cache.
+            # If so, remember it and fall back to direct CC API.
             if "not found" in str(ex).lower():
+                self._uncached_slots.add(slot_info.slot_number)
                 _LOGGER.info(
                     "ZWaveJSBackend.async_set_usercode: slot %d not in "
                     "node cache for %s — falling back to CC API direct set",
@@ -534,6 +551,17 @@ class ZWaveJSBackend:
         Returns:
             True on success, False on any exception.
         """
+        # If this slot is known to be missing from the node cache, skip
+        # the high-level service and go straight to CC API.
+        if slot_info.slot_number in self._uncached_slots:
+            _LOGGER.info(
+                "ZWaveJSBackend.async_clear_usercode: slot %d known uncached "
+                "for %s — using CC API directly",
+                slot_info.slot_number,
+                self._entity_id,
+            )
+            return await self._async_clear_usercode_cc_api(slot_info)
+
         service_data: dict[str, Any] = {
             "entity_id": self._entity_id,
             "code_slot": slot_info.slot_number,
@@ -565,10 +593,10 @@ class ZWaveJSBackend:
         except Exception as ex:  # noqa: BLE001
             elapsed = time.monotonic() - t0
             if "not found" in str(ex).lower():
+                self._uncached_slots.add(slot_info.slot_number)
                 _LOGGER.info(
                     "ZWaveJSBackend.async_clear_usercode: slot %d not in "
-                    "node cache for %s — falling back to CC API direct set "
-                    "(status=0 = Available)",
+                    "node cache for %s — falling back to CC API clear",
                     slot_info.slot_number,
                     self._entity_id,
                 )
@@ -595,15 +623,16 @@ class ZWaveJSBackend:
     async def _async_clear_usercode_cc_api(self, slot_info: SlotInfo) -> bool:
         """Clear a user code directly via User Code CC invoke_cc_api.
 
-        Bypasses the Z-Wave JS node cache.  Uses CC method "set"
-        with parameters [slot_number, UserIdStatus.Available (0), ""].
+        Bypasses the Z-Wave JS node cache.  Uses CC method "clear"
+        with parameters [slot_number].  The "set" method with status 0
+        and empty string causes a 500 error on many locks.
         """
         service_data: dict[str, Any] = {
             "entity_id": self._entity_id,
             "command_class": _USER_CODE_CC,
             "endpoint": 0,
-            "method_name": "set",
-            "parameters": [slot_info.slot_number, 0, ""],
+            "method_name": "clear",
+            "parameters": [slot_info.slot_number],
         }
         t0 = time.monotonic()
         try:
