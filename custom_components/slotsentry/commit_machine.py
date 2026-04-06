@@ -560,7 +560,7 @@ class LockCommitMachine:
                 await self._store.async_save()
 
                 result.failed += 1
-                self._current_operation = f"Slot {slot_number}: FAILED after {attempt} attempts"
+                self._current_operation = f"Slot {slot_number}: FAILED, moving to next slot"
                 _LOGGER.warning(
                     "LockCommitMachine[%s]: slot %d FAILED after %d attempts",
                     self._lock_entity,
@@ -584,7 +584,7 @@ class LockCommitMachine:
             # failure, so use (attempt - 1) clamped to the tuple length.
             backoff_idx = min(attempt - 1, len(RETRY_BACKOFF) - 1)
             delay = RETRY_BACKOFF[backoff_idx]
-            self._current_operation = f"Slot {slot_number}: failed, retrying in {delay}s"
+            self._current_operation = f"Slot {slot_number}: error, retrying in {delay}s"
             _LOGGER.info(
                 "LockCommitMachine[%s]: slot %d will retry in %ds "
                 "(attempt %d/%d failed: %s)",

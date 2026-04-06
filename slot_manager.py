@@ -374,11 +374,28 @@ class SlotManager:
         self._fire_push_status_event()
 
     def clear_error_counters(self) -> None:
-        """Reset session-only error and failure counters for all locks."""
+        """Reset session-only error/failure counters and allow failed slots to retry.
+
+        Resets:
+          - Session-only error_count / failure_count accumulators
+          - Per-slot attempt counters in each commit machine (so retries restart)
+          - STATE_FAILED commit states → SYNC_OUT_OF_SYNC (so next push retries them)
+        """
         for lock_entity in self._error_counts:
             self._error_counts[lock_entity] = 0
             self._failure_counts[lock_entity] = 0
-        _LOGGER.info("Error and failure counters cleared for all locks")
+
+        for lock_entity, machine in self._machines.items():
+            machine.reset_attempt_counters()
+            # Reset FAILED commits back to out_of_sync so they'll be retried.
+            commits = self._store.get_all_lock_commits(lock_entity)
+            for sn, commit in commits.items():
+                if commit.state == STATE_FAILED:
+                    commit.state = SYNC_OUT_OF_SYNC
+                    self._store.set_lock_commit(lock_entity, commit)
+
+        self._fire_push_status_event()
+        _LOGGER.info("Error/failure counters and failed states cleared for all locks")
 
     # ------------------------------------------------------------------
     # Latency profiling

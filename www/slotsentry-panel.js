@@ -758,7 +758,7 @@ class SlotSentryPanel extends HTMLElement {
 
     // Check if any errors exist for the Clear Errors button
     const hasErrors = Object.values(this._status).some(
-      s => (s.error_count > 0) || (s.failure_count > 0) || (s.failed_count > 0)
+      s => (s.error_count > 0) || (s.failed_count > 0)
     );
 
     // Error badge: only show if there are actual errors; make it clickable
@@ -969,13 +969,11 @@ class SlotSentryPanel extends HTMLElement {
     const state = info.state || "uncertain";
     const isActive = this._activePushLock === lockEntity;
 
-    // Error/failure counters
+    // Error counter (total error events this session)
     let errorCountHTML = "";
-    if ((info.error_count ?? 0) > 0) {
-      errorCountHTML += '<span class="lock-count-item"><span class="dot dot-failed"></span>' + info.error_count + ' errors</span>';
-    }
-    if ((info.failure_count ?? 0) > 0) {
-      errorCountHTML += '<span class="lock-count-item"><span class="dot dot-failed"></span>' + info.failure_count + ' failures</span>';
+    const totalErrors = (info.error_count ?? 0);
+    if (totalErrors > 0) {
+      errorCountHTML = '<span class="lock-count-item"><span class="dot dot-failed"></span>' + totalErrors + ' errors</span>';
     }
 
     // Failed slots display

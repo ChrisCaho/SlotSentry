@@ -219,8 +219,8 @@ class LockBackend(Protocol):
 # ---------------------------------------------------------------------------
 
 # User Code Command Class identifier used with invoke_cc_api.
-# This is the Z-Wave command class name as accepted by zwave_js.
-_USER_CODE_CC = "User Code"
+# invoke_cc_api expects the integer command class ID, not the name string.
+_USER_CODE_CC = 99  # 0x63 — User Code command class
 
 # Door Lock Command Class name (reserved for keypad lockout — Phase 2).
 _DOOR_LOCK_CC = "Door Lock"
