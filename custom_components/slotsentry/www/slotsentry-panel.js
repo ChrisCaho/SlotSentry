@@ -162,6 +162,21 @@ class SlotSentryPanel extends HTMLElement {
     await this._refresh();
     this._loading = false;
     this._scheduleRender();
+
+    // Trigger background latency profiling (fire-and-forget).
+    this._profileLatency();
+  }
+
+  async _profileLatency() {
+    try {
+      await this._hass.callWS({
+        type: "slotsentry/profile_latency",
+        entry_id: this._entryId,
+      });
+    } catch (err) {
+      // Non-critical — just log, don't toast.
+      console.debug("SlotSentry: latency profiling request failed:", err);
+    }
   }
 
   async _discoverEntryId() {

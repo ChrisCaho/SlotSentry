@@ -124,14 +124,17 @@ class LockCommitMachine:
         backend: LockBackend,
         store: SlotSentryStore,
         lock_entity: str,
+        typical_latency: float | None = None,
     ) -> None:
         """Initialise the machine for one lock.
 
         Args:
-            hass:        The Home Assistant instance.
-            backend:     Lock backend shim for the controlled lock.
-            store:       Shared SlotSentry storage instance (already loaded).
-            lock_entity: HA entity ID of the lock, e.g. ``"lock.back_door"``.
+            hass:            The Home Assistant instance.
+            backend:         Lock backend shim for the controlled lock.
+            store:           Shared SlotSentry storage instance (already loaded).
+            lock_entity:     HA entity ID of the lock, e.g. ``"lock.back_door"``.
+            typical_latency: Profiled round-trip latency (seconds); used to
+                             compute a proactive inter-slot delay baseline.
         """
         self._hass = hass
         self._backend = backend
@@ -151,9 +154,16 @@ class LockCommitMachine:
         # Tracks the last Z-Wave call's elapsed time for adaptive delay.
         self._last_call_elapsed: float = 0.0
 
+        # Profiled typical latency — used as proactive delay baseline.
+        self._typical_latency: float | None = typical_latency
+
         # Internal machine state for get_status().
         self._machine_state: str = STATE_IDLE
         self._current_slot: int | None = None
+
+    def update_typical_latency(self, latency: float) -> None:
+        """Update the profiled latency (called by LatencyProfiler)."""
+        self._typical_latency = latency
 
     # ------------------------------------------------------------------
     # Public API
@@ -385,21 +395,24 @@ class LockCommitMachine:
                     consecutive_failures = 0
 
                 # Adaptive inter-slot delay — give the Z-Wave mesh and lock
-                # breathing room.  If the last call was slow (lock struggling),
-                # increase the delay proportionally.
+                # breathing room.  Combines a proactive baseline from latency
+                # profiling with a reactive adjustment from the last call.
                 if slots_actually_pushed > 0:
-                    adaptive_delay = max(
-                        INTER_SLOT_DELAY,
-                        self._last_call_elapsed / 5.0,
-                    )
+                    # Proactive: use profiled latency as baseline (if available).
+                    base = INTER_SLOT_DELAY
+                    if self._typical_latency is not None:
+                        base = max(base, self._typical_latency * 1.5)
+                    # Reactive: stretch if last call was slow.
+                    adaptive_delay = max(base, self._last_call_elapsed / 5.0)
                     # Cap at a reasonable maximum.
                     adaptive_delay = min(adaptive_delay, 10.0)
                     _LOGGER.debug(
                         "LockCommitMachine[%s]: inter-slot delay %.1fs "
-                        "(last call took %.1fs)",
+                        "(last call took %.1fs, typical=%.1fs)",
                         self._lock_entity,
                         adaptive_delay,
                         self._last_call_elapsed,
+                        self._typical_latency or 0.0,
                     )
                     await asyncio.sleep(adaptive_delay)
 

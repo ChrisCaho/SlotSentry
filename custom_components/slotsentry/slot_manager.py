@@ -14,6 +14,7 @@ Revision: 2.0 — a13 overhaul: granular dirty marking, disabled-slot rules,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -38,6 +39,7 @@ from .const import (
     SYNC_SYNCED,
     SYNC_UNCERTAIN,
 )
+from .latency import LatencyProfile, LatencyProfiler
 from .lock_backend import LockBackend
 from .storage import SlotData, SlotSentryStore, hash_code
 
@@ -80,6 +82,8 @@ class SlotManager:
 
         self._machines: dict[str, LockCommitMachine] = {}
         self._active_push_lock: str | None = None
+        self._profiler = LatencyProfiler(backends)
+        self._latency_profiles: dict[str, LatencyProfile] = {}
 
         # Session-only counters (reset on HA restart).
         self._error_counts: dict[str, int] = {}    # lock_entity → count
@@ -150,9 +154,18 @@ class SlotManager:
                         commit.state = SYNC_SYNCED
                         self._store.set_lock_commit(lock_entity, commit)
 
+        # Load latency profiles from storage.
+        raw_profiles = self._store.get_all_latency_profiles()
+        for eid, raw in raw_profiles.items():
+            self._latency_profiles[eid] = LatencyProfile.from_dict(eid, raw)
+
         for lock_entity, backend in self._backends.items():
+            typical = None
+            if lock_entity in self._latency_profiles:
+                typical = self._latency_profiles[lock_entity].typical_latency
             self._machines[lock_entity] = LockCommitMachine(
                 self._hass, backend, self._store, lock_entity,
+                typical_latency=typical,
             )
             self._error_counts[lock_entity] = 0
             self._failure_counts[lock_entity] = 0
@@ -358,6 +371,40 @@ class SlotManager:
             self._error_counts[lock_entity] = 0
             self._failure_counts[lock_entity] = 0
         _LOGGER.info("Error and failure counters cleared for all locks")
+
+    # ------------------------------------------------------------------
+    # Latency profiling
+    # ------------------------------------------------------------------
+
+    async def async_profile_latency(self) -> dict[str, LatencyProfile]:
+        """Run latency profiling on all locks and update pacing.
+
+        Called as a background task when the panel opens. Updates stored
+        profiles and pushes new typical_latency values into machines.
+        """
+        self._latency_profiles = await self._profiler.async_profile_all(
+            self._latency_profiles,
+        )
+
+        # Persist and push updated latencies into commit machines.
+        for eid, profile in self._latency_profiles.items():
+            self._store.set_latency_profile(eid, profile.to_dict())
+            machine = self._machines.get(eid)
+            if machine and profile.typical_latency is not None:
+                machine.update_typical_latency(profile.typical_latency)
+
+        await self._async_save()
+        _LOGGER.info(
+            "Latency profiling complete: %s",
+            {eid: f"{p.typical_latency:.3f}s" for eid, p in self._latency_profiles.items()
+             if p.typical_latency is not None},
+        )
+        return self._latency_profiles
+
+    @property
+    def latency_profiles(self) -> dict[str, LatencyProfile]:
+        """Current latency profiles for all locks."""
+        return dict(self._latency_profiles)
 
     # ------------------------------------------------------------------
     # Status queries

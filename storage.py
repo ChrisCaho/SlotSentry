@@ -750,6 +750,30 @@ class SlotSentryStore:
         self._data["config"][key] = value
 
     # ------------------------------------------------------------------
+    # Latency profiles
+    # ------------------------------------------------------------------
+
+    def get_latency_profile(self, lock_entity: str) -> dict | None:
+        """Return the raw latency profile dict for one lock, or None."""
+        self._require_loaded()
+        assert self._data is not None
+        return self._data.get("latency_profiles", {}).get(lock_entity)
+
+    def set_latency_profile(self, lock_entity: str, profile_dict: dict) -> None:
+        """Store a latency profile dict for one lock."""
+        self._require_loaded()
+        assert self._data is not None
+        if "latency_profiles" not in self._data:
+            self._data["latency_profiles"] = {}
+        self._data["latency_profiles"][lock_entity] = profile_dict
+
+    def get_all_latency_profiles(self) -> dict[str, dict]:
+        """Return all latency profiles as {entity_id: profile_dict}."""
+        self._require_loaded()
+        assert self._data is not None
+        return dict(self._data.get("latency_profiles", {}))
+
+    # ------------------------------------------------------------------
     # Schema helpers
     # ------------------------------------------------------------------
 

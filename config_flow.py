@@ -485,6 +485,34 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         self._secure_mode: bool = False
         self._secure_password: str = ""
 
+        # Latency profiling: samples accumulated across config flow steps.
+        self._latency_samples: dict[str, list[float]] = {}
+
+    # ------------------------------------------------------------------
+    # Latency profiling during config flow
+    # ------------------------------------------------------------------
+
+    async def _async_ping_selected_locks(self) -> None:
+        """Ping all selected locks once and accumulate latency samples.
+
+        Non-blocking: skips locks that don't respond within 10s.
+        Called on each config flow step transition after lock selection.
+        """
+        if not self._lock_entities:
+            return
+
+        from .lock_backend import ZWaveJSBackend
+
+        for entity_id in self._lock_entities:
+            backend = ZWaveJSBackend(self.hass, entity_id)
+            # No async_init needed — ping doesn't require capability discovery.
+            latency = await backend.async_ping()
+            if latency is not None:
+                self._latency_samples.setdefault(entity_id, []).append(latency)
+                _LOGGER.debug(
+                    "Config flow ping: %s = %.3fs", entity_id, latency,
+                )
+
     # ------------------------------------------------------------------
     # Step 1: Welcome
     # ------------------------------------------------------------------
@@ -575,6 +603,10 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 # If slot count discovery failed, ask the user.
                 if not slot_counts:
                     return await self.async_step_slot_count()
+
+                # Initial latency profiling — 3 pings per lock.
+                for _ in range(3):
+                    await self._async_ping_selected_locks()
 
                 return await self.async_step_lock_code_lengths()
 
@@ -723,6 +755,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                         self._code_length_2,
                         self._per_lock_code_length,
                     )
+                    await self._async_ping_selected_locks()
                     return await self.async_step_seed()
 
         # Build schema with one dropdown per lock.
@@ -862,6 +895,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     "Seed: %d slot(s) will be pre-populated from lock data",
                     len(self._seed_slots),
                 )
+            await self._async_ping_selected_locks()
             return await self.async_step_lockout()
 
         # Build dropdown options.
@@ -1054,6 +1088,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._lockout_trigger_entity = trigger_entity
                     self._lockout_target_states = target_states
                     self._lockout_participating_locks = participating
+                    await self._async_ping_selected_locks()
                     return await self.async_step_secure_mode()
             else:
                 # Toggle OFF → disabled, proceed. Any filled fields are
@@ -1062,6 +1097,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._lockout_trigger_entity = None
                 self._lockout_target_states = []
                 self._lockout_participating_locks = []
+                await self._async_ping_selected_locks()
                 return await self.async_step_secure_mode()
 
             _LOGGER.warning("Lockout validation errors: %s", errors)
@@ -1168,6 +1204,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
                 else:
                     self._secure_mode = True
                     self._secure_password = password
+                    await self._async_ping_selected_locks()
                     return await self.async_step_confirm()
             elif has_password_data:
                 # Secure mode OFF but password fields not empty — user
@@ -1176,6 +1213,7 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 # Secure mode OFF, no password data — proceed.
                 self._secure_mode = False
+                await self._async_ping_selected_locks()
                 return await self.async_step_confirm()
 
         schema = vol.Schema(
@@ -1291,6 +1329,10 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
         # Include seed data if the user chose to seed from a lock.
         if self._seed_slots:
             data["seed_slots"] = self._seed_slots
+
+        # Include latency samples from config flow pings.
+        if self._latency_samples:
+            data["initial_latency_samples"] = self._latency_samples
 
         _LOGGER.info(
             "Creating SlotSentry config entry: %d locks, %d slots, mode=%s, "

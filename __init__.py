@@ -150,6 +150,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: SlotSentryConfigEntry) -
     slot_manager = SlotManager(hass, entry, store, backends)
     await slot_manager.async_load()
 
+    # 3b. Process initial latency samples from config flow (one-time).
+    initial_samples = entry.data.get("initial_latency_samples")
+    if initial_samples:
+        import statistics
+
+        from .latency import LatencyProfile
+
+        for eid, samples in initial_samples.items():
+            if samples:
+                median_val = round(statistics.median(samples), 4)
+                profile = LatencyProfile(
+                    entity_id=eid,
+                    typical_latency=median_val,
+                    sample_count=len(samples),
+                    last_profiled_at=None,
+                    last_raw_samples=[round(s, 4) for s in samples],
+                )
+                store.set_latency_profile(eid, profile.to_dict())
+                _LOGGER.info(
+                    "Initial latency profile for %s: %.3fs (%d samples)",
+                    eid, median_val, len(samples),
+                )
+        await store.async_save()
+
+        # Strip one-time data from config entry.
+        new_data = {k: v for k, v in entry.data.items() if k != "initial_latency_samples"}
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
     # 4. Store runtime data on entry
     runtime_data = SlotSentryData(
         slot_manager=slot_manager,

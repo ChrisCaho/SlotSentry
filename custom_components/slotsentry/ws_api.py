@@ -52,6 +52,7 @@ from .const import (
     WS_PUSH_ALL,
     WS_PUSH_LOCK,
     WS_CLEAR_ERRORS,
+    WS_PROFILE_LATENCY,
     WS_SECURE_STATUS,
     WS_SET_SLOT,
     WS_UNLOCK,
@@ -841,6 +842,40 @@ async def ws_clear_errors(
     _LOGGER.debug("ws_clear_errors: counters cleared for entry %s", msg["entry_id"])
 
 
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_PROFILE_LATENCY,
+        vol.Required("entry_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_profile_latency(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Trigger background latency profiling on all locks.
+
+    WebSocket command: ``slotsentry/profile_latency``
+
+    Returns immediately. Profiling runs as a background task.
+    """
+    slot_manager = _get_slot_manager(hass, connection, msg)
+    if slot_manager is None:
+        return
+
+    # Fire-and-forget background task.
+    hass.async_create_task(
+        slot_manager.async_profile_latency(),
+        name="slotsentry_profile_latency",
+    )
+    connection.send_result(msg["id"], {"profiling_started": True})
+    _LOGGER.debug(
+        "ws_profile_latency: background profiling started for entry %s",
+        msg["entry_id"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -868,10 +903,11 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_lock)
     websocket_api.async_register_command(hass, ws_secure_status)
     websocket_api.async_register_command(hass, ws_clear_errors)
+    websocket_api.async_register_command(hass, ws_profile_latency)
 
     _LOGGER.debug(
         "SlotSentry: registered %d WebSocket command(s): %s",
-        11,
+        12,
         ", ".join(
             [
                 WS_GET_CONFIG,
@@ -885,6 +921,7 @@ def async_register_ws_commands(hass: HomeAssistant) -> None:
                 WS_LOCK,
                 WS_SECURE_STATUS,
                 WS_CLEAR_ERRORS,
+                WS_PROFILE_LATENCY,
             ]
         ),
     )

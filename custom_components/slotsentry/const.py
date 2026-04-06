@@ -35,6 +35,13 @@ VERIFY_SETTLE_DELAY = 1.5    # Seconds after set before readback verification
 CONSECUTIVE_FAIL_PAUSE = 3   # After N consecutive slot failures, pause the lock
 CONSECUTIVE_FAIL_COOLDOWN = 30.0  # Seconds to pause after consecutive failures
 
+# Latency profiling
+LATENCY_VARIANCE_THRESHOLD = 0.25   # 25% — triggers deep profile
+LATENCY_QUICK_PING_COUNT = 3        # Pings per lock on panel open
+LATENCY_DEEP_PING_COUNT = 15        # Pings when variance exceeds threshold
+LATENCY_INTER_PING_DELAY = 0.5      # Seconds between pings to same lock
+LATENCY_PROFILE_COOLDOWN = 300      # Seconds before re-profiling allowed
+
 # Secure mode
 MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_LENGTH = 16
@@ -60,6 +67,7 @@ WS_UNLOCK = "slotsentry/unlock"
 WS_LOCK = "slotsentry/lock"
 WS_SECURE_STATUS = "slotsentry/secure_status"
 WS_CLEAR_ERRORS = "slotsentry/clear_errors"
+WS_PROFILE_LATENCY = "slotsentry/profile_latency"
 
 # Commit state machine states
 STATE_IDLE = "idle"

@@ -200,6 +200,19 @@ class LockBackend(Protocol):
         """
         ...
 
+    async def async_ping(self) -> float | None:
+        """Ping the lock and return the round-trip time in seconds.
+
+        Used by the latency profiler to measure communication health.
+        Each backend implements this with the appropriate protocol-specific
+        mechanism (Z-Wave ping, HTTP HEAD, ZCL read, etc.).
+
+        Returns:
+            The measured round-trip latency in seconds, or None if the
+            lock is unreachable or the protocol does not support ping.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # ZWaveJSBackend — Phase 1 implementation
@@ -634,3 +647,35 @@ class ZWaveJSBackend:
             Always None for ZWaveJSBackend.
         """
         return None
+
+    async def async_ping(self) -> float | None:
+        """Ping the lock via zwave_js.ping and return round-trip seconds.
+
+        Returns:
+            Measured latency in seconds, or None if unreachable/timeout.
+        """
+        t0 = time.monotonic()
+        try:
+            async with asyncio.timeout(10.0):
+                await self._hass.services.async_call(
+                    ZWAVE_DOMAIN,
+                    "ping",
+                    {"entity_id": self._entity_id},
+                    blocking=True,
+                )
+        except (TimeoutError, Exception):  # noqa: BLE001
+            elapsed = time.monotonic() - t0
+            _LOGGER.debug(
+                "ZWaveJSBackend.async_ping: %s unreachable after %.1fs",
+                self._entity_id,
+                elapsed,
+            )
+            return None
+
+        elapsed = time.monotonic() - t0
+        _LOGGER.debug(
+            "ZWaveJSBackend.async_ping: %s responded in %.3fs",
+            self._entity_id,
+            elapsed,
+        )
+        return elapsed
