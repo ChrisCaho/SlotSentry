@@ -47,6 +47,7 @@ from .const import (
     SERVICE_CLEAR_LOCK_USERCODE,
     SERVICE_INVOKE_CC_API,
     SERVICE_SET_LOCK_USERCODE,
+    SLOW_LOCK_TIMEOUT,
     ZWAVE_DOMAIN,
 )
 
@@ -264,6 +265,7 @@ class ZWaveJSBackend:
         self._entity_id = entity_id
         self._supports_readback: bool = False
         self._supported_code_lengths: tuple[int, int] = _DEFAULT_CODE_LENGTH_RANGE
+        self._timeout: int = PUSH_TIMEOUT_SECONDS
         # Slots known to be missing from Z-Wave JS ValueDB (node cache).
         # Once a slot triggers "not found", we go straight to CC API on
         # subsequent attempts instead of wasting time on the high-level
@@ -390,6 +392,25 @@ class ZWaveJSBackend:
         """Discovered (min, max) code length range for this lock."""
         return self._supported_code_lengths
 
+    def update_timeout(self, typical_latency: float) -> None:
+        """Adjust per-call timeout based on profiled latency.
+
+        Slow locks (300-series, typical_latency > 1s) get a 60s timeout
+        instead of the default 45s to accommodate their 15-30s per-command
+        processing time.
+        """
+        from .const import SLOW_LOCK_LATENCY_THRESHOLD
+        if typical_latency >= SLOW_LOCK_LATENCY_THRESHOLD:
+            self._timeout = SLOW_LOCK_TIMEOUT
+            _LOGGER.info(
+                "ZWaveJSBackend: %s timeout increased to %ds (slow lock, latency=%.1fs)",
+                self._entity_id,
+                self._timeout,
+                typical_latency,
+            )
+        else:
+            self._timeout = PUSH_TIMEOUT_SECONDS
+
     # ------------------------------------------------------------------
     # Protocol methods
     # ------------------------------------------------------------------
@@ -435,7 +456,7 @@ class ZWaveJSBackend:
         )
         t0 = time.monotonic()
         try:
-            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self._timeout):
                 await self._hass.services.async_call(
                     ZWAVE_DOMAIN,
                     SERVICE_SET_LOCK_USERCODE,
@@ -501,7 +522,7 @@ class ZWaveJSBackend:
         }
         t0 = time.monotonic()
         try:
-            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self._timeout):
                 await self._hass.services.async_call(
                     ZWAVE_DOMAIN,
                     SERVICE_INVOKE_CC_API,
@@ -573,7 +594,7 @@ class ZWaveJSBackend:
         )
         t0 = time.monotonic()
         try:
-            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self._timeout):
                 await self._hass.services.async_call(
                     ZWAVE_DOMAIN,
                     SERVICE_CLEAR_LOCK_USERCODE,
@@ -636,7 +657,7 @@ class ZWaveJSBackend:
         }
         t0 = time.monotonic()
         try:
-            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self._timeout):
                 await self._hass.services.async_call(
                     ZWAVE_DOMAIN,
                     SERVICE_INVOKE_CC_API,
@@ -707,7 +728,7 @@ class ZWaveJSBackend:
             slot_info.slot_number,
         )
         try:
-            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self._timeout):
                 response = await self._hass.services.async_call(
                     ZWAVE_DOMAIN,
                     SERVICE_INVOKE_CC_API,
@@ -719,7 +740,7 @@ class ZWaveJSBackend:
             _LOGGER.warning(
                 "ZWaveJSBackend.async_get_usercode: timeout after %ds "
                 "for %s slot %d",
-                PUSH_TIMEOUT_SECONDS,
+                self._timeout,
                 self._entity_id,
                 slot_info.slot_number,
             )

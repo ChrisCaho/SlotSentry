@@ -37,6 +37,11 @@ from .const import (
     MAX_RETRIES,
     MIN_INTER_SLOT_DELAY,
     RETRY_BACKOFF,
+    SLOW_LOCK_FAIL_COOLDOWN,
+    SLOW_LOCK_FAIL_PAUSE,
+    SLOW_LOCK_LATENCY_THRESHOLD,
+    SLOW_LOCK_SLOT_MULTIPLIER,
+    SLOW_LOCK_TIMEOUT,
     STATE_FAILED,
     STATE_IDLE,
     STATE_PUSHING,
@@ -164,11 +169,26 @@ class LockCommitMachine:
         self._machine_state: str = STATE_IDLE
         self._current_slot: int | None = None
         self._current_operation: str | None = None
+        self._progress_prefix: str = ""
+        self._progress_eta: str = ""
 
     @property
     def is_busy(self) -> bool:
         """True if a push is currently running on this lock."""
         return self._busy
+
+    @property
+    def is_slow_lock(self) -> bool:
+        """True if profiled latency exceeds the slow-lock threshold.
+
+        Slow locks (e.g., 300-series Schlage FE595/FE599) get higher
+        inter-slot delays, longer timeouts, and more conservative
+        failure cooldowns.
+        """
+        return (
+            self._typical_latency is not None
+            and self._typical_latency >= SLOW_LOCK_LATENCY_THRESHOLD
+        )
 
     def update_typical_latency(self, latency: float) -> None:
         """Update the profiled latency (called by LatencyProfiler)."""
@@ -361,6 +381,14 @@ class LockCommitMachine:
         consecutive_failures = 0
         slots_actually_pushed = 0
 
+        # Pre-count slots that need sync for progress display.
+        slots_needing_push = 0
+        for sn in sorted(slots.keys()):
+            s = slots[sn]
+            c = self._store.get_lock_commit(self._lock_entity, sn)
+            if self._slot_needs_sync(s, c):
+                slots_needing_push += 1
+
         try:
             for slot_number in sorted(slots.keys()):
                 slot = slots[slot_number]
@@ -395,24 +423,30 @@ class LockCommitMachine:
 
                 # Consecutive failure pause — if the lock is struggling,
                 # give it a long cooldown before trying more slots.
-                if consecutive_failures >= CONSECUTIVE_FAIL_PAUSE:
+                # Slow locks (300-series) use a lower threshold and longer cooldown.
+                fail_threshold = SLOW_LOCK_FAIL_PAUSE if self.is_slow_lock else CONSECUTIVE_FAIL_PAUSE
+                fail_cooldown = SLOW_LOCK_FAIL_COOLDOWN if self.is_slow_lock else CONSECUTIVE_FAIL_COOLDOWN
+                if consecutive_failures >= fail_threshold:
                     _LOGGER.warning(
                         "LockCommitMachine[%s]: %d consecutive failures — "
-                        "pausing %.0fs to let lock recover",
+                        "pausing %.0fs to let lock recover (slow_lock=%s)",
                         self._lock_entity,
                         consecutive_failures,
-                        CONSECUTIVE_FAIL_COOLDOWN,
+                        fail_cooldown,
+                        self.is_slow_lock,
                     )
-                    self._current_operation = f"Pausing {CONSECUTIVE_FAIL_COOLDOWN:.0f}s after {consecutive_failures} failures"
-                    await asyncio.sleep(CONSECUTIVE_FAIL_COOLDOWN)
+                    self._current_operation = f"Pausing {fail_cooldown:.0f}s after {consecutive_failures} failures"
+                    await asyncio.sleep(fail_cooldown)
                     consecutive_failures = 0
 
                 # Adaptive inter-slot delay — uses discovered latency as the
                 # baseline (not a conservative constant).  Ramps up on errors.
+                # Slow locks use a higher multiplier (3x vs 1.5x).
                 if slots_actually_pushed > 0:
                     if self._typical_latency is not None:
                         # Latency-driven: use discovered latency as baseline.
-                        base = self._typical_latency * LATENCY_SLOT_MULTIPLIER
+                        mult = SLOW_LOCK_SLOT_MULTIPLIER if self.is_slow_lock else LATENCY_SLOT_MULTIPLIER
+                        base = self._typical_latency * mult
                         # Ramp up on consecutive errors.
                         if consecutive_failures > 0:
                             base *= (1.0 + consecutive_failures * LATENCY_ERROR_RAMP)
@@ -437,6 +471,22 @@ class LockCommitMachine:
                     await asyncio.sleep(adaptive_delay)
 
                 self._current_slot = slot_number
+
+                # Progress prefix for status line: "3/19 "
+                progress_idx = slots_actually_pushed + 1
+                self._progress_prefix = f"{progress_idx}/{slots_needing_push} "
+
+                # Estimate remaining time based on average elapsed per slot.
+                if slots_actually_pushed > 0:
+                    avg_per_slot = (time.monotonic() - push_start) / slots_actually_pushed
+                    remaining = avg_per_slot * (slots_needing_push - slots_actually_pushed)
+                    if remaining >= 60:
+                        self._progress_eta = f" (~{remaining / 60:.0f}m left)"
+                    else:
+                        self._progress_eta = f" (~{remaining:.0f}s left)"
+                else:
+                    self._progress_eta = ""
+
                 pre_synced = result.synced
                 await self._push_slot_with_retry(
                     slot, commit, code_length_mode, code_length_1, code_length_2,
@@ -512,7 +562,7 @@ class LockCommitMachine:
             self._attempt_counts[slot_number] = attempt
 
             retry_label = f" retry {attempt}/{MAX_RETRIES}" if attempt > 1 else ""
-            self._current_operation = f"Slot {slot_number}: pushing{retry_label}"
+            self._current_operation = f"{self._progress_prefix}Slot {slot_number}: pushing{retry_label}{self._progress_eta}"
             _LOGGER.info(
                 "LockCommitMachine[%s]: pushing slot %d (attempt %d/%d)",
                 self._lock_entity,
@@ -544,7 +594,7 @@ class LockCommitMachine:
                 await self._store.async_save()
 
                 result.synced += 1
-                self._current_operation = f"Slot {slot_number}: OK ({self._last_call_elapsed:.1f}s)"
+                self._current_operation = f"{self._progress_prefix}Slot {slot_number}: OK ({self._last_call_elapsed:.1f}s)"
                 _LOGGER.info(
                     "LockCommitMachine[%s]: slot %d synced successfully",
                     self._lock_entity,
@@ -574,7 +624,7 @@ class LockCommitMachine:
                 await self._store.async_save()
 
                 result.failed += 1
-                self._current_operation = f"Slot {slot_number}: FAILED, moving to next slot"
+                self._current_operation = f"{self._progress_prefix}Slot {slot_number}: FAILED, moving to next slot"
                 _LOGGER.warning(
                     "LockCommitMachine[%s]: slot %d FAILED after %d attempts",
                     self._lock_entity,
@@ -598,7 +648,7 @@ class LockCommitMachine:
             # failure, so use (attempt - 1) clamped to the tuple length.
             backoff_idx = min(attempt - 1, len(RETRY_BACKOFF) - 1)
             delay = RETRY_BACKOFF[backoff_idx]
-            self._current_operation = f"Slot {slot_number}: error, retrying in {delay}s"
+            self._current_operation = f"{self._progress_prefix}Slot {slot_number}: error, retrying in {delay}s"
             _LOGGER.info(
                 "LockCommitMachine[%s]: slot %d will retry in %ds "
                 "(attempt %d/%d failed: %s)",

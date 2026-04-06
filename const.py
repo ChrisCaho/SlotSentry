@@ -9,7 +9,7 @@ Revision: 1.3
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a21"
+VERSION = "2026.4.0a22"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 2
@@ -38,6 +38,13 @@ MIN_INTER_SLOT_DELAY = 0.3      # Absolute floor for inter-slot delay (seconds)
 VERIFY_SETTLE_DELAY = 1.5    # Seconds after set before readback verification
 CONSECUTIVE_FAIL_PAUSE = 3   # After N consecutive slot failures, pause the lock
 CONSECUTIVE_FAIL_COOLDOWN = 30.0  # Seconds to pause after consecutive failures
+
+# Slow lock detection and tuning (300-series Z-Wave, e.g., Schlage FE595/FE599)
+SLOW_LOCK_LATENCY_THRESHOLD = 1.0   # Locks with typical_latency above this are "slow"
+SLOW_LOCK_SLOT_MULTIPLIER = 3.0     # Inter-slot delay = typical_latency × this for slow locks
+SLOW_LOCK_TIMEOUT = 60              # Per-call timeout for slow locks (seconds)
+SLOW_LOCK_FAIL_PAUSE = 2            # Consecutive failures before cooldown on slow locks
+SLOW_LOCK_FAIL_COOLDOWN = 60.0      # Cooldown seconds after consecutive failures on slow locks
 
 # Latency profiling
 LATENCY_VARIANCE_THRESHOLD = 0.25   # 25% — triggers deep profile

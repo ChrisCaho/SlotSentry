@@ -181,6 +181,9 @@ class SlotManager:
                 self._hass, backend, self._store, lock_entity,
                 typical_latency=typical,
             )
+            # Apply saved latency to backend timeout.
+            if typical is not None and hasattr(backend, "update_timeout"):
+                backend.update_timeout(typical)
             self._error_counts[lock_entity] = 0
             self._failure_counts[lock_entity] = 0
 
@@ -492,12 +495,16 @@ class SlotManager:
             self._latency_profiles,
         )
 
-        # Persist and push updated latencies into commit machines.
+        # Persist and push updated latencies into commit machines and backends.
         for eid, profile in self._latency_profiles.items():
             self._store.set_latency_profile(eid, profile.to_dict())
-            machine = self._machines.get(eid)
-            if machine and profile.typical_latency is not None:
-                machine.update_typical_latency(profile.typical_latency)
+            if profile.typical_latency is not None:
+                machine = self._machines.get(eid)
+                if machine:
+                    machine.update_typical_latency(profile.typical_latency)
+                backend = self._backends.get(eid)
+                if backend and hasattr(backend, "update_timeout"):
+                    backend.update_timeout(profile.typical_latency)
 
         await self._async_save()
         _LOGGER.info(
