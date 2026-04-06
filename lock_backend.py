@@ -392,6 +392,11 @@ class ZWaveJSBackend:
     async def async_set_usercode(self, slot_info: SlotInfo, code: str) -> bool:
         """Push a code to the lock via zwave_js.set_lock_usercode.
 
+        If the HA service fails because the slot isn't in the Z-Wave JS
+        node cache (``"not found"``), automatically falls back to a direct
+        User Code CC ``set`` via ``zwave_js.invoke_cc_api``, which bypasses
+        the cache entirely and writes straight to the lock.
+
         Ignores slot_info.label — Z-Wave does not use code names.
 
         Args:
@@ -431,8 +436,18 @@ class ZWaveJSBackend:
                 slot_info.slot_number,
             )
             return False
-        except Exception:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001
             elapsed = time.monotonic() - t0
+            # Check if this is a "slot not found in cache" error.
+            # If so, fall back to direct CC API which bypasses the cache.
+            if "not found" in str(ex).lower():
+                _LOGGER.info(
+                    "ZWaveJSBackend.async_set_usercode: slot %d not in "
+                    "node cache for %s — falling back to CC API direct set",
+                    slot_info.slot_number,
+                    self._entity_id,
+                )
+                return await self._async_set_usercode_cc_api(slot_info, code)
             _LOGGER.warning(
                 "ZWaveJSBackend.async_set_usercode: FAILED after %.1fs "
                 "for %s slot %d",
@@ -446,6 +461,62 @@ class ZWaveJSBackend:
         elapsed = time.monotonic() - t0
         _LOGGER.info(
             "ZWaveJSBackend.async_set_usercode: OK in %.1fs — %s slot=%d",
+            elapsed,
+            self._entity_id,
+            slot_info.slot_number,
+        )
+        return True
+
+    async def _async_set_usercode_cc_api(
+        self, slot_info: SlotInfo, code: str,
+    ) -> bool:
+        """Write a user code directly via User Code CC invoke_cc_api.
+
+        Bypasses the Z-Wave JS node cache entirely.  Uses CC method "set"
+        with parameters [slot_number, UserIdStatus.Enabled (1), code_string].
+        """
+        service_data: dict[str, Any] = {
+            "entity_id": self._entity_id,
+            "command_class": _USER_CODE_CC,
+            "endpoint": 0,
+            "method_name": "set",
+            "parameters": [slot_info.slot_number, 1, code],
+        }
+        t0 = time.monotonic()
+        try:
+            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+                await self._hass.services.async_call(
+                    ZWAVE_DOMAIN,
+                    SERVICE_INVOKE_CC_API,
+                    service_data,
+                    blocking=True,
+                )
+        except TimeoutError:
+            elapsed = time.monotonic() - t0
+            _LOGGER.warning(
+                "ZWaveJSBackend._async_set_usercode_cc_api: TIMEOUT after "
+                "%.1fs for %s slot %d",
+                elapsed,
+                self._entity_id,
+                slot_info.slot_number,
+            )
+            return False
+        except Exception:  # noqa: BLE001
+            elapsed = time.monotonic() - t0
+            _LOGGER.warning(
+                "ZWaveJSBackend._async_set_usercode_cc_api: FAILED after "
+                "%.1fs for %s slot %d",
+                elapsed,
+                self._entity_id,
+                slot_info.slot_number,
+                exc_info=True,
+            )
+            return False
+
+        elapsed = time.monotonic() - t0
+        _LOGGER.info(
+            "ZWaveJSBackend._async_set_usercode_cc_api: OK in %.1fs — "
+            "%s slot=%d (direct CC API)",
             elapsed,
             self._entity_id,
             slot_info.slot_number,
@@ -491,8 +562,17 @@ class ZWaveJSBackend:
                 slot_info.slot_number,
             )
             return False
-        except Exception:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001
             elapsed = time.monotonic() - t0
+            if "not found" in str(ex).lower():
+                _LOGGER.info(
+                    "ZWaveJSBackend.async_clear_usercode: slot %d not in "
+                    "node cache for %s — falling back to CC API direct set "
+                    "(status=0 = Available)",
+                    slot_info.slot_number,
+                    self._entity_id,
+                )
+                return await self._async_clear_usercode_cc_api(slot_info)
             _LOGGER.warning(
                 "ZWaveJSBackend.async_clear_usercode: FAILED after %.1fs "
                 "for %s slot %d",
@@ -506,6 +586,60 @@ class ZWaveJSBackend:
         elapsed = time.monotonic() - t0
         _LOGGER.info(
             "ZWaveJSBackend.async_clear_usercode: OK in %.1fs — %s slot=%d",
+            elapsed,
+            self._entity_id,
+            slot_info.slot_number,
+        )
+        return True
+
+    async def _async_clear_usercode_cc_api(self, slot_info: SlotInfo) -> bool:
+        """Clear a user code directly via User Code CC invoke_cc_api.
+
+        Bypasses the Z-Wave JS node cache.  Uses CC method "set"
+        with parameters [slot_number, UserIdStatus.Available (0), ""].
+        """
+        service_data: dict[str, Any] = {
+            "entity_id": self._entity_id,
+            "command_class": _USER_CODE_CC,
+            "endpoint": 0,
+            "method_name": "set",
+            "parameters": [slot_info.slot_number, 0, ""],
+        }
+        t0 = time.monotonic()
+        try:
+            async with asyncio.timeout(PUSH_TIMEOUT_SECONDS):
+                await self._hass.services.async_call(
+                    ZWAVE_DOMAIN,
+                    SERVICE_INVOKE_CC_API,
+                    service_data,
+                    blocking=True,
+                )
+        except TimeoutError:
+            elapsed = time.monotonic() - t0
+            _LOGGER.warning(
+                "ZWaveJSBackend._async_clear_usercode_cc_api: TIMEOUT after "
+                "%.1fs for %s slot %d",
+                elapsed,
+                self._entity_id,
+                slot_info.slot_number,
+            )
+            return False
+        except Exception:  # noqa: BLE001
+            elapsed = time.monotonic() - t0
+            _LOGGER.warning(
+                "ZWaveJSBackend._async_clear_usercode_cc_api: FAILED after "
+                "%.1fs for %s slot %d",
+                elapsed,
+                self._entity_id,
+                slot_info.slot_number,
+                exc_info=True,
+            )
+            return False
+
+        elapsed = time.monotonic() - t0
+        _LOGGER.info(
+            "ZWaveJSBackend._async_clear_usercode_cc_api: OK in %.1fs — "
+            "%s slot=%d (direct CC API)",
             elapsed,
             self._entity_id,
             slot_info.slot_number,
