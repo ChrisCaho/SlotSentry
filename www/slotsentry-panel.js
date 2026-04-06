@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a16
+ * Version: 2026.4.0a17
  * Revision: 3.0
  *
  * Copyright (c) 2026 Chris Caho
@@ -753,7 +753,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a16";
+    const version = "v2026.4.0a17";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Check if any errors exist for the Clear Errors button
