@@ -9,7 +9,7 @@ Revision: 1.3
 
 from __future__ import annotations
 
-VERSION = "2026.4.0a24"
+VERSION = "2026.4.0a25"
 DOMAIN = "slotsentry"
 STORAGE_KEY = "slotsentry"
 STORAGE_VERSION = 2
@@ -107,6 +107,7 @@ CONF_CODE_LENGTH_1 = "code_length_1"
 CONF_CODE_LENGTH_2 = "code_length_2"
 CONF_PER_LOCK_CODE_LENGTH = "per_lock_code_length"
 CONF_SLOT_COUNT = "slot_count"
+CONF_PER_LOCK_SLOT_COUNT = "per_lock_slot_count"
 CONF_SECURE_MODE = "secure_mode"
 CONF_SECURE_PASSWORD_HASH = "secure_password_hash"
 CONF_SECURE_ENCRYPTION_SALT = "secure_encryption_salt"

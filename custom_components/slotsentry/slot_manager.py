@@ -29,6 +29,7 @@ from .const import (
     CONF_CODE_LENGTH_2,
     CONF_CODE_LENGTH_MODE,
     CONF_PER_LOCK_CODE_LENGTH,
+    CONF_PER_LOCK_SLOT_COUNT,
     CONF_SECURE_MODE,
     CONF_SLOT_COUNT,
     EVENT_PUSH_STATUS_CHANGED,
@@ -122,6 +123,14 @@ class SlotManager:
     @property
     def per_lock_code_length(self) -> dict[str, int]:
         return dict(self._entry.data.get(CONF_PER_LOCK_CODE_LENGTH, {}))
+
+    @property
+    def per_lock_slot_count(self) -> dict[str, int]:
+        return dict(self._entry.data.get(CONF_PER_LOCK_SLOT_COUNT, {}))
+
+    def get_lock_total_slots(self, lock_entity: str) -> int:
+        """Return the total physical slot count for a lock (per-lock or fallback)."""
+        return self.per_lock_slot_count.get(lock_entity, self.slot_count)
 
     @property
     def active_push_lock(self) -> str | None:
@@ -309,27 +318,14 @@ class SlotManager:
     # Push engine
     # ------------------------------------------------------------------
 
-    async def async_push_all(self, force: bool = False) -> None:
+    async def async_push_all(self) -> None:
         """Push dirty slots to all configured locks sequentially.
 
-        Args:
-            force: If True, mark ALL slots on ALL locks dirty first so
-                   every slot is pushed (set codes where data, clear empties).
+        First-ever push per lock triggers full reconciliation (force + unmanaged clearing).
+        Subsequent pushes are incremental (only dirty slots).
         """
         if not self._machines:
             return
-
-        if force:
-            for lock_entity in self._machines:
-                machine = self._machines[lock_entity]
-                if machine.is_busy:
-                    continue
-                machine.reset_attempt_counters()
-                for sn in range(1, self.slot_count + 1):
-                    commit = self._store.get_lock_commit(lock_entity, sn)
-                    commit.state = SYNC_OUT_OF_SYNC
-                    self._store.set_lock_commit(lock_entity, commit)
-            _LOGGER.info("Force-push-all: marked all slots dirty on all locks")
 
         mode = self.code_length_mode
         cl1 = self.code_length_1
@@ -371,10 +367,28 @@ class SlotManager:
             self._active_push_lock = lock_entity
             self._fire_push_status_event()
 
+            # First-push detection: if this lock has never had a full push,
+            # do a full reconciliation (force + unmanaged slot clearing).
+            is_first_push = not self._store.is_initial_push_done(lock_entity)
+            force = is_first_push
+            total_lock_slots = self.get_lock_total_slots(lock_entity) if is_first_push else None
+
+            if force:
+                machine.reset_attempt_counters()
+                for sn in range(1, self.slot_count + 1):
+                    commit = self._store.get_lock_commit(lock_entity, sn)
+                    commit.state = SYNC_OUT_OF_SYNC
+                    self._store.set_lock_commit(lock_entity, commit)
+                _LOGGER.info(
+                    "First push for %s: full reconciliation (total_lock_slots=%s)",
+                    lock_entity, total_lock_slots,
+                )
+
             slots = self._store.get_slots()
             lock_cl = plcl.get(lock_entity)
             result = await machine.async_push_dirty_slots(
-                slots, mode, cl1, cl2, lock_cl,
+                slots, mode, cl1, cl2, lock_cl, force=force,
+                total_lock_slots=total_lock_slots,
             )
 
             # Accumulate error/failure counters from the result.
@@ -386,20 +400,23 @@ class SlotManager:
                     self._failure_counts.get(lock_entity, 0) + result.failed
                 )
 
+                # Mark initial push done on success (even if some slots failed).
+                if is_first_push:
+                    self._store.set_initial_push_done(lock_entity, True)
+                    await self._async_save()
+                    _LOGGER.info("Initial push completed for %s", lock_entity)
+
             self._fire_push_status_event()
             lock_count += 1
 
         self._active_push_lock = None
         self._fire_push_status_event()
 
-    async def async_push_lock(self, lock_entity: str, force: bool = False) -> None:
-        """Push slots to a single lock.
+    async def async_push_lock(self, lock_entity: str) -> None:
+        """Push Lock — full reconciliation of ALL slots on a single lock.
 
-        Args:
-            lock_entity: The lock to push to.
-            force: If True, mark ALL slots dirty for this lock first so every
-                   slot is pushed (set codes where data exists, clear empties).
-                   If False, only push slots already marked out_of_sync.
+        Always force-pushes all managed slots and clears unmanaged slots
+        beyond the managed range (3-phase push).
 
         Raises:
             RuntimeError: If the lock is already being pushed.
@@ -414,14 +431,18 @@ class SlotManager:
                 f"cancel the current push first or wait for it to finish"
             )
 
-        if force:
-            # Mark every slot dirty for this lock so the push loop processes all.
-            machine.reset_attempt_counters()
-            for sn in range(1, self.slot_count + 1):
-                commit = self._store.get_lock_commit(lock_entity, sn)
-                commit.state = SYNC_OUT_OF_SYNC
-                self._store.set_lock_commit(lock_entity, commit)
-            _LOGGER.info("Force-push: marked all %d slots dirty for %s", self.slot_count, lock_entity)
+        # Mark every slot dirty for this lock so the push loop processes all.
+        machine.reset_attempt_counters()
+        for sn in range(1, self.slot_count + 1):
+            commit = self._store.get_lock_commit(lock_entity, sn)
+            commit.state = SYNC_OUT_OF_SYNC
+            self._store.set_lock_commit(lock_entity, commit)
+
+        total_lock_slots = self.get_lock_total_slots(lock_entity)
+        _LOGGER.info(
+            "Push Lock: full reconciliation for %s (managed=%d, total=%d)",
+            lock_entity, self.slot_count, total_lock_slots,
+        )
 
         self._active_push_lock = lock_entity
         self._fire_push_status_event()
@@ -430,7 +451,7 @@ class SlotManager:
         lock_cl = self.per_lock_code_length.get(lock_entity)
         result = await machine.async_push_dirty_slots(
             slots, self.code_length_mode, self.code_length_1, self.code_length_2,
-            lock_cl,
+            lock_cl, force=True, total_lock_slots=total_lock_slots,
         )
 
         if result is not None:
@@ -440,6 +461,11 @@ class SlotManager:
             self._failure_counts[lock_entity] = (
                 self._failure_counts.get(lock_entity, 0) + result.failed
             )
+
+            # Push Lock always counts as initial push done.
+            if not self._store.is_initial_push_done(lock_entity):
+                self._store.set_initial_push_done(lock_entity, True)
+                await self._async_save()
 
         self._active_push_lock = None
         self._fire_push_status_event()
@@ -550,7 +576,6 @@ class SlotManager:
         existing_slots = self._store.get_slots()
 
         for lock_entity in self._backends:
-            commits = self._store.get_all_lock_commits(lock_entity)
             synced = 0
             failed = 0
             pending = 0
@@ -558,16 +583,17 @@ class SlotManager:
             dirty: list[int] = []
             failed_slots: list[int] = []
 
-            for sn, commit in commits.items():
-                slot = existing_slots.get(sn)
+            for sn in sorted(existing_slots.keys()):
+                slot = existing_slots[sn]
+                commit = self._store.get_lock_commit(lock_entity, sn)
 
                 # Disabled slots are invisible to locks.
-                if slot and not slot.enabled:
+                if not slot.enabled:
                     synced += 1
                     continue
 
                 # Empty slots that were never pushed — nothing to clear.
-                if slot and slot.is_empty() and commit.pushed_at is None:
+                if slot.is_empty() and commit.pushed_at is None:
                     synced += 1
                     continue
 

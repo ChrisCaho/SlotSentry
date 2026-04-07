@@ -576,7 +576,6 @@ class SlotManager:
         existing_slots = self._store.get_slots()
 
         for lock_entity in self._backends:
-            commits = self._store.get_all_lock_commits(lock_entity)
             synced = 0
             failed = 0
             pending = 0
@@ -584,16 +583,17 @@ class SlotManager:
             dirty: list[int] = []
             failed_slots: list[int] = []
 
-            for sn, commit in commits.items():
-                slot = existing_slots.get(sn)
+            for sn in sorted(existing_slots.keys()):
+                slot = existing_slots[sn]
+                commit = self._store.get_lock_commit(lock_entity, sn)
 
                 # Disabled slots are invisible to locks.
-                if slot and not slot.enabled:
+                if not slot.enabled:
                     synced += 1
                     continue
 
                 # Empty slots that were never pushed — nothing to clear.
-                if slot and slot.is_empty() and commit.pushed_at is None:
+                if slot.is_empty() and commit.pushed_at is None:
                     synced += 1
                     continue
 

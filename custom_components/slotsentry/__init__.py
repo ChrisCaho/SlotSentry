@@ -30,7 +30,9 @@ from .const import (
     CONF_CODE_LENGTH_MODE,
     CONF_LOCK_ENTITIES,
     CONF_PER_LOCK_CODE_LENGTH,
+    CONF_PER_LOCK_SLOT_COUNT,
     CONF_SECURE_MODE,
+    CONF_SLOT_COUNT,
     DEFAULT_CODE_LENGTH,
     DOMAIN,
     PLATFORMS,
@@ -145,6 +147,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: SlotSentryConfigEntry) -
                 exc_info=True,
             )
         backends[entity_id] = backend
+
+    # 2b. Migrate: derive per-lock slot counts for existing installs.
+    if CONF_PER_LOCK_SLOT_COUNT not in entry.data:
+        _LOGGER.info("Deriving per-lock slot counts for existing install")
+        from .config_flow import _async_get_max_user_codes  # noqa: E402
+
+        per_lock_slots: dict[str, int] = {}
+        fallback_count = int(entry.data.get(CONF_SLOT_COUNT, 0))
+        for eid in lock_entities:
+            try:
+                discovered = await _async_get_max_user_codes(hass, eid)
+                per_lock_slots[eid] = discovered if discovered else fallback_count
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Could not discover slot count for %s; using fallback %d",
+                    eid, fallback_count,
+                )
+                per_lock_slots[eid] = fallback_count
+
+        new_data = dict(entry.data)
+        new_data[CONF_PER_LOCK_SLOT_COUNT] = per_lock_slots
+        hass.config_entries.async_update_entry(entry, data=new_data)
+        _LOGGER.info("Per-lock slot counts: %s", per_lock_slots)
 
     # 3. Create and load SlotManager
     slot_manager = SlotManager(hass, entry, store, backends)

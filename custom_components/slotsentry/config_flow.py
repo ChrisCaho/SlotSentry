@@ -50,6 +50,7 @@ from .const import (
     CONF_LOCKOUT_TARGET_STATES,
     CONF_LOCKOUT_TRIGGER_ENTITY,
     CONF_PER_LOCK_CODE_LENGTH,
+    CONF_PER_LOCK_SLOT_COUNT,
     CONF_SECURE_ENCRYPTION_SALT,
     CONF_SECURE_MODE,
     CONF_SECURE_PASSWORD_HASH,
@@ -1310,6 +1311,13 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_CODE_LENGTH_1: self._code_length_1,
             CONF_CODE_LENGTH_2: self._code_length_2,
             CONF_PER_LOCK_CODE_LENGTH: self._per_lock_code_length,
+            CONF_PER_LOCK_SLOT_COUNT: {
+                eid: next(
+                    (lk["slots"] for lk in self._available_locks if lk["entity_id"] == eid),
+                    None,
+                ) or self._slot_count
+                for eid in self._lock_entities
+            },
             CONF_SECURE_MODE: self._secure_mode,
             CONF_LOCKOUT_ENABLED: self._lockout_enabled,
             CONF_LOCKOUT_TRIGGER_ENTITY: self._lockout_trigger_entity,
@@ -1787,6 +1795,13 @@ class SlotSentryConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_CODE_LENGTH_1: self._code_length_1,
             CONF_CODE_LENGTH_2: self._code_length_2,
             CONF_PER_LOCK_CODE_LENGTH: self._per_lock_code_length,
+            CONF_PER_LOCK_SLOT_COUNT: {
+                eid: next(
+                    (lk["slots"] for lk in self._available_locks if lk["entity_id"] == eid),
+                    None,
+                ) or self._slot_count
+                for eid in self._lock_entities
+            },
             CONF_SECURE_MODE: self._secure_mode,
             CONF_LOCKOUT_ENABLED: self._lockout_enabled,
             CONF_LOCKOUT_TRIGGER_ENTITY: self._lockout_trigger_entity,
