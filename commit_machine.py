@@ -698,30 +698,29 @@ class LockCommitMachine:
         slot_number = slot.slot_number
         slot_info = SlotInfo(slot_number=slot_number, label=slot.label)
 
-        # Disabled slots are invisible to locks — never push or clear.
-        if not slot.enabled:
-            _LOGGER.debug(
-                "LockCommitMachine[%s]: slot %d is disabled — skipping",
-                self._lock_entity,
-                slot_number,
-            )
-            return True, None
-
-        # Empty slots that have never been pushed — nothing on lock to clear.
+        # Check if this slot was ever pushed to this lock.
         commit = self._store.get_lock_commit(self._lock_entity, slot_number)
-        if slot.is_empty() and (commit is None or commit.pushed_at is None):
+        was_pushed = commit is not None and commit.pushed_at is not None
+
+        # Disabled or empty slots that were previously pushed need clearing
+        # (the lock still has old codes).  If never pushed, skip entirely.
+        if not slot.enabled or slot.is_empty():
+            if was_pushed:
+                _LOGGER.info(
+                    "LockCommitMachine[%s]: slot %d is %s but was previously "
+                    "pushed — clearing from lock",
+                    self._lock_entity,
+                    slot_number,
+                    "disabled" if not slot.enabled else "empty",
+                )
+                return await self._attempt_clear(slot_info)
             _LOGGER.debug(
-                "LockCommitMachine[%s]: slot %d is empty and never pushed — skipping",
+                "LockCommitMachine[%s]: slot %d is %s and never pushed — skipping",
                 self._lock_entity,
                 slot_number,
+                "disabled" if not slot.enabled else "empty",
             )
             return True, None
-
-        # Determine whether to set or clear.
-        if slot.is_empty():
-            # Clear path: slot has no code, or is disabled but has data
-            # (user wants codes removed from lock).
-            return await self._attempt_clear(slot_info)
 
         # Set path: select code to push.
         code = self._select_code_for_lock(
@@ -1046,14 +1045,15 @@ class LockCommitMachine:
     def _slot_needs_sync(self, slot: SlotData, commit: LockSlotCommit) -> bool:
         """Return True if this slot requires a push to the lock.
 
-        Disabled slots never need sync. Empty never-pushed slots skip too.
+        Disabled/empty slots that were previously pushed still need clearing.
         """
-        # Disabled slots are invisible to locks.
-        if not slot.enabled:
-            return False
+        was_pushed = commit.pushed_at is not None
 
-        # Empty slots never pushed — nothing to clear.
-        if slot.is_empty() and commit.pushed_at is None:
+        # Disabled or empty slots: need sync only if previously pushed
+        # (lock still has old codes that must be cleared).
+        if not slot.enabled or slot.is_empty():
+            if was_pushed and commit.state != SYNC_SYNCED:
+                return True
             return False
 
         if commit.state != SYNC_SYNCED:
