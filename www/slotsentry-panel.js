@@ -1,7 +1,7 @@
 /**
  * SlotSentry Panel — HA sidebar frontend
  * Custom element: slotsentry-panel
- * Version: 2026.4.0a22
+ * Version: 2026.4.0a23
  * Revision: 3.0
  *
  * Copyright (c) 2026 Chris Caho
@@ -489,11 +489,13 @@ class SlotSentryPanel extends HTMLElement {
     // Flush all pending auto-save timers before pushing
     this._flushAllAutoSaveTimers();
     this._pushing = true;
-    this._pushProgress = "Pushing to all locks\u2026";
+    const force = !!this._updateAll;
+    this._pushProgress = force ? "Force-pushing all slots to all locks\u2026" : "Pushing to all locks\u2026";
     this._scheduleRender();
 
     try {
-      await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId });
+      await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId, force });
+      if (force) this._updateAll = false;
       this._startPushPoll();
     } catch (err) {
       this._pushing = false;
@@ -753,7 +755,7 @@ class SlotSentryPanel extends HTMLElement {
 
     const badge = this._overallStatusBadge();
     const lockNames = this._lockNames().join(" \u2022 ");
-    const version = "v2026.4.0a22";
+    const version = "v2026.4.0a23";
     const modeName = this._isDual ? "Dual" : "Single";
 
     // Check if any errors exist for the Clear Errors button

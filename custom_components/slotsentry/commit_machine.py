@@ -453,8 +453,12 @@ class LockCommitMachine:
                     else:
                         # No latency data — fall back to conservative constant.
                         base = INTER_SLOT_DELAY
-                    # Reactive: stretch if last call was unusually slow.
-                    adaptive_delay = max(base, self._last_call_elapsed / 5.0)
+                    # Reactive stretch: only increase delay when the last call
+                    # was unusually slow (>3× typical latency), indicating the
+                    # lock is under stress.  Normal variation stays at base.
+                    adaptive_delay = base
+                    if self._typical_latency and self._last_call_elapsed > self._typical_latency * 3:
+                        adaptive_delay = max(base, self._last_call_elapsed / 5.0)
                     # Floor and cap.
                     adaptive_delay = max(adaptive_delay, MIN_INTER_SLOT_DELAY)
                     adaptive_delay = min(adaptive_delay, 10.0)
@@ -579,6 +583,8 @@ class LockCommitMachine:
             self._last_call_elapsed = time.monotonic() - t0
 
             if success:
+                # Clear attempt counter on success so future pushes start fresh.
+                self._attempt_counts.pop(slot_number, None)
                 # Update commit record: SUCCESS
                 new_commit = LockSlotCommit(
                     slot_number=slot_number,

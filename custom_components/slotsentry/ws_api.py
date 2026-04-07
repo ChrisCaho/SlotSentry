@@ -383,6 +383,7 @@ async def ws_delete_slot(
     {
         vol.Required("type"): WS_PUSH_ALL,
         vol.Required("entry_id"): str,
+        vol.Optional("force", default=False): bool,
     }
 )
 @websocket_api.async_response
@@ -395,14 +396,10 @@ async def ws_push_all(
 
     WebSocket command: ``slotsentry/push_all``
 
-    The push is executed inline from the perspective of this command, but
-    each lock push runs in its own asyncio Task internally (see
-    SlotManager.async_push_all).  The frontend should monitor push
-    progress by subscribing to ``slotsentry_push_status_changed`` HA events
-    or by polling ``slotsentry/get_status``.
-
     Request fields:
         entry_id (str): The config entry ID.
+        force   (bool): Optional. If true, mark ALL slots on ALL locks
+                        dirty before pushing (full re-sync).
 
     Requires an unlocked secure session when secure mode is active.
 
@@ -417,7 +414,8 @@ async def ws_push_all(
     if slot_manager is None:
         return
 
-    task = hass.async_create_task(slot_manager.async_push_all())
+    force = msg.get("force", False)
+    task = hass.async_create_task(slot_manager.async_push_all(force=force))
     slot_manager.register_push_task(task)
 
     connection.send_result(msg["id"], {"success": True})

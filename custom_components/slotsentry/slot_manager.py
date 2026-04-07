@@ -309,10 +309,27 @@ class SlotManager:
     # Push engine
     # ------------------------------------------------------------------
 
-    async def async_push_all(self) -> None:
-        """Push dirty slots to all configured locks sequentially."""
+    async def async_push_all(self, force: bool = False) -> None:
+        """Push dirty slots to all configured locks sequentially.
+
+        Args:
+            force: If True, mark ALL slots on ALL locks dirty first so
+                   every slot is pushed (set codes where data, clear empties).
+        """
         if not self._machines:
             return
+
+        if force:
+            for lock_entity in self._machines:
+                machine = self._machines[lock_entity]
+                if machine.is_busy:
+                    continue
+                machine.reset_attempt_counters()
+                for sn in range(1, self.slot_count + 1):
+                    commit = self._store.get_lock_commit(lock_entity, sn)
+                    commit.state = SYNC_OUT_OF_SYNC
+                    self._store.set_lock_commit(lock_entity, commit)
+            _LOGGER.info("Force-push-all: marked all slots dirty on all locks")
 
         mode = self.code_length_mode
         cl1 = self.code_length_1
@@ -718,6 +735,10 @@ class SlotManager:
 
         # If slot was disabled and stays disabled, never mark locks dirty.
         if not old_enabled and not enabled:
+            _LOGGER.info(
+                "Slot %d: disabled→disabled, no dirty marking (c1=%s→%s, c2=%s→%s)",
+                slot_number, bool(old_code_1), bool(code_1), bool(old_code_2), bool(code_2),
+            )
             return
 
         # Enabled toggle: all locks dirty.
@@ -726,7 +747,7 @@ class SlotManager:
                 commit = self._store.get_lock_commit(lock_entity, slot_number)
                 commit.state = SYNC_OUT_OF_SYNC
                 self._store.set_lock_commit(lock_entity, commit)
-                _LOGGER.debug(
+                _LOGGER.info(
                     "Slot %d: enabled toggled (%s→%s) — %s marked out_of_sync",
                     slot_number, old_enabled, enabled, lock_entity,
                 )
@@ -755,10 +776,16 @@ class SlotManager:
                 commit = self._store.get_lock_commit(lock_entity, slot_number)
                 commit.state = SYNC_OUT_OF_SYNC
                 self._store.set_lock_commit(lock_entity, commit)
-                _LOGGER.debug(
+                _LOGGER.info(
                     "Slot %d: %s — %s marked out_of_sync",
                     slot_number, reason, lock_entity,
                 )
+
+        if not any([enabled_changed, code_1_changed, code_2_changed, label_changed]):
+            _LOGGER.info(
+                "Slot %d: no field changes detected — no locks marked dirty",
+                slot_number,
+            )
 
     def _fire_push_status_event(self) -> None:
         self._hass.bus.async_fire(
