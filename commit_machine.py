@@ -321,6 +321,8 @@ class LockCommitMachine:
         code_length_1: int | None,
         code_length_2: int | None,
         lock_code_length: int | None = None,
+        force: bool = False,
+        total_lock_slots: int | None = None,
     ) -> PushResult | None:
         """Push all dirty slots for this lock to the physical hardware.
 
@@ -333,6 +335,10 @@ class LockCommitMachine:
             code_length_1:     Primary code length.
             code_length_2:     Secondary code length (dual mode).
             lock_code_length:  Code length assigned to this lock.
+            force:             If True, push/clear every slot regardless of
+                               sync state, enabled flag, or push history.
+            total_lock_slots:  If set, clear unmanaged slots beyond the
+                               managed range (Phase 3 of full reconciliation).
 
         Returns:
             PushResult summary, or None if the lock was busy.
@@ -348,7 +354,7 @@ class LockCommitMachine:
         try:
             return await self._do_push_dirty_slots(
                 slots, code_length_mode, code_length_1, code_length_2,
-                lock_code_length,
+                lock_code_length, force, total_lock_slots,
             )
         finally:
             self._busy = False
@@ -360,6 +366,8 @@ class LockCommitMachine:
         code_length_1: int | None,
         code_length_2: int | None,
         lock_code_length: int | None = None,
+        force: bool = False,
+        total_lock_slots: int | None = None,
     ) -> PushResult:
         """Inner push loop, runs under the per-lock asyncio.Lock."""
         self._machine_state = STATE_PUSHING
@@ -382,12 +390,18 @@ class LockCommitMachine:
         slots_actually_pushed = 0
 
         # Pre-count slots that need sync for progress display.
+        managed_count = len(slots)
         slots_needing_push = 0
         for sn in sorted(slots.keys()):
             s = slots[sn]
             c = self._store.get_lock_commit(self._lock_entity, sn)
-            if self._slot_needs_sync(s, c):
+            if force or self._slot_needs_sync(s, c):
                 slots_needing_push += 1
+        # Phase 3: count unmanaged slots that will be cleared.
+        unmanaged_count = 0
+        if total_lock_slots and total_lock_slots > managed_count:
+            unmanaged_count = total_lock_slots - managed_count
+            slots_needing_push += unmanaged_count
 
         try:
             for slot_number in sorted(slots.keys()):
@@ -396,16 +410,17 @@ class LockCommitMachine:
                     self._lock_entity, slot_number
                 )
 
-                # Check whether name-based backend needs re-push due to label change.
-                needs_sync = self._slot_needs_sync(slot, commit)
-                if not needs_sync:
-                    _LOGGER.debug(
-                        "LockCommitMachine[%s]: slot %d already synced, skipping",
-                        self._lock_entity,
-                        slot_number,
-                    )
-                    result.synced += 1
-                    continue
+                # In force mode, push/clear every slot. Otherwise check sync.
+                if not force:
+                    needs_sync = self._slot_needs_sync(slot, commit)
+                    if not needs_sync:
+                        _LOGGER.debug(
+                            "LockCommitMachine[%s]: slot %d already synced, skipping",
+                            self._lock_entity,
+                            slot_number,
+                        )
+                        result.synced += 1
+                        continue
 
                 # Check if this slot has already exhausted its retries.
                 attempts_so_far = self._attempt_counts.get(slot_number, 0)
@@ -494,7 +509,7 @@ class LockCommitMachine:
                 pre_synced = result.synced
                 await self._push_slot_with_retry(
                     slot, commit, code_length_mode, code_length_1, code_length_2,
-                    lock_code_length, result,
+                    lock_code_length, result, force=force,
                 )
                 slots_actually_pushed += 1
 
@@ -503,6 +518,87 @@ class LockCommitMachine:
                     consecutive_failures = 0
                 else:
                     consecutive_failures += 1
+
+            # -------------------------------------------------------
+            # Phase 3: Clear unmanaged slots beyond managed range.
+            # Only runs when total_lock_slots > managed slot count.
+            # -------------------------------------------------------
+            if unmanaged_count > 0:
+                _LOGGER.info(
+                    "LockCommitMachine[%s]: Phase 3 — clearing %d unmanaged slots (%d–%d)",
+                    self._lock_entity,
+                    unmanaged_count,
+                    managed_count + 1,
+                    total_lock_slots,
+                )
+                for sn in range(managed_count + 1, total_lock_slots + 1):
+                    # Consecutive failure pause (same logic as managed slots).
+                    fail_threshold = SLOW_LOCK_FAIL_PAUSE if self.is_slow_lock else CONSECUTIVE_FAIL_PAUSE
+                    fail_cooldown = SLOW_LOCK_FAIL_COOLDOWN if self.is_slow_lock else CONSECUTIVE_FAIL_COOLDOWN
+                    if consecutive_failures >= fail_threshold:
+                        _LOGGER.warning(
+                            "LockCommitMachine[%s]: %d consecutive failures — "
+                            "pausing %.0fs (Phase 3)",
+                            self._lock_entity, consecutive_failures, fail_cooldown,
+                        )
+                        self._current_operation = f"Pausing {fail_cooldown:.0f}s after {consecutive_failures} failures"
+                        await asyncio.sleep(fail_cooldown)
+                        consecutive_failures = 0
+
+                    # Adaptive inter-slot delay.
+                    if slots_actually_pushed > 0:
+                        if self._typical_latency is not None:
+                            mult = SLOW_LOCK_SLOT_MULTIPLIER if self.is_slow_lock else LATENCY_SLOT_MULTIPLIER
+                            base = self._typical_latency * mult
+                            if consecutive_failures > 0:
+                                base *= (1.0 + consecutive_failures * LATENCY_ERROR_RAMP)
+                        else:
+                            base = INTER_SLOT_DELAY
+                        adaptive_delay = base
+                        if self._typical_latency and self._last_call_elapsed > self._typical_latency * 3:
+                            adaptive_delay = max(base, self._last_call_elapsed / 5.0)
+                        adaptive_delay = max(adaptive_delay, MIN_INTER_SLOT_DELAY)
+                        adaptive_delay = min(adaptive_delay, 10.0)
+                        await asyncio.sleep(adaptive_delay)
+
+                    self._current_slot = sn
+                    slots_actually_pushed += 1
+                    progress_idx = slots_actually_pushed
+                    self._progress_prefix = f"{progress_idx}/{slots_needing_push} "
+
+                    # ETA.
+                    avg_per_slot = (time.monotonic() - push_start) / max(slots_actually_pushed - 1, 1)
+                    remaining = avg_per_slot * (slots_needing_push - slots_actually_pushed + 1)
+                    if remaining >= 60:
+                        self._progress_eta = f" (~{remaining / 60:.0f}m left)"
+                    else:
+                        self._progress_eta = f" (~{remaining:.0f}s left)"
+
+                    self._current_operation = f"{self._progress_prefix}Slot {sn}: clearing unmanaged{self._progress_eta}"
+                    _LOGGER.info(
+                        "LockCommitMachine[%s]: Phase 3 clearing unmanaged slot %d",
+                        self._lock_entity, sn,
+                    )
+
+                    slot_info = SlotInfo(slot_number=sn, label="")
+                    t0 = time.monotonic()
+                    success, error_msg = await self._attempt_clear(slot_info)
+                    self._last_call_elapsed = time.monotonic() - t0
+
+                    if success:
+                        result.synced += 1
+                        consecutive_failures = 0
+                    else:
+                        result.failed += 1
+                        result.errors.append(
+                            PushError(slot_number=sn, attempt=1, error_message=error_msg or "clear failed")
+                        )
+                        consecutive_failures += 1
+
+                _LOGGER.info(
+                    "LockCommitMachine[%s]: Phase 3 complete — cleared %d unmanaged slots",
+                    self._lock_entity, unmanaged_count,
+                )
 
         except asyncio.CancelledError:
             _LOGGER.info(
@@ -545,6 +641,7 @@ class LockCommitMachine:
         code_length_2: int | None,
         lock_code_length: int | None,
         result: PushResult,
+        force: bool = False,
     ) -> None:
         """Push one slot, retrying on failure up to MAX_RETRIES times.
 
@@ -578,7 +675,7 @@ class LockCommitMachine:
             t0 = time.monotonic()
             success, error_msg = await self._attempt_push(
                 slot, code_length_mode, code_length_1, code_length_2,
-                lock_code_length,
+                lock_code_length, force=force,
             )
             self._last_call_elapsed = time.monotonic() - t0
 
@@ -678,6 +775,7 @@ class LockCommitMachine:
         code_length_1: int | None,
         code_length_2: int | None,
         lock_code_length: int | None = None,
+        force: bool = False,
     ) -> tuple[bool, str | None]:
         """Execute one push attempt for a slot.
 
@@ -690,6 +788,7 @@ class LockCommitMachine:
             code_length_1:     Primary code length.
             code_length_2:     Secondary code length.
             lock_code_length:  Code length assigned to this lock.
+            force:             If True, always push/clear — never skip.
 
         Returns:
             A ``(success, error_message)`` tuple.  ``error_message`` is
@@ -698,20 +797,19 @@ class LockCommitMachine:
         slot_number = slot.slot_number
         slot_info = SlotInfo(slot_number=slot_number, label=slot.label)
 
-        # Check if this slot was ever pushed to this lock.
-        commit = self._store.get_lock_commit(self._lock_entity, slot_number)
-        was_pushed = commit is not None and commit.pushed_at is not None
-
-        # Disabled or empty slots that were previously pushed need clearing
-        # (the lock still has old codes).  If never pushed, skip entirely.
+        # Disabled or empty slots: clear from lock.
+        # In normal mode, only clear if previously pushed. In force mode,
+        # always clear (ensures lock is clean even for never-pushed slots).
         if not slot.enabled or slot.is_empty():
-            if was_pushed:
+            commit = self._store.get_lock_commit(self._lock_entity, slot_number)
+            was_pushed = commit is not None and commit.pushed_at is not None
+            if force or was_pushed:
                 _LOGGER.info(
-                    "LockCommitMachine[%s]: slot %d is %s but was previously "
-                    "pushed — clearing from lock",
+                    "LockCommitMachine[%s]: slot %d is %s — clearing from lock%s",
                     self._lock_entity,
                     slot_number,
                     "disabled" if not slot.enabled else "empty",
+                    " (force)" if force and not was_pushed else "",
                 )
                 return await self._attempt_clear(slot_info)
             _LOGGER.debug(

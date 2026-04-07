@@ -35,6 +35,7 @@ from .const import (
     CONF_CODE_LENGTH_MODE,
     CONF_LOCK_ENTITIES,
     CONF_PER_LOCK_CODE_LENGTH,
+    CONF_PER_LOCK_SLOT_COUNT,
     CONF_LOCKOUT_ENABLED,
     CONF_LOCKOUT_PARTICIPATING_LOCKS,
     CONF_LOCKOUT_TARGET_STATES,
@@ -383,7 +384,6 @@ async def ws_delete_slot(
     {
         vol.Required("type"): WS_PUSH_ALL,
         vol.Required("entry_id"): str,
-        vol.Optional("force", default=False): bool,
     }
 )
 @websocket_api.async_response
@@ -392,14 +392,12 @@ async def ws_push_all(
     connection: websocket_api.ActiveConnection,
     msg: dict[str, Any],
 ) -> None:
-    """Push all dirty slots to every configured lock in parallel.
+    """Push dirty slots to every configured lock.
 
     WebSocket command: ``slotsentry/push_all``
 
-    Request fields:
-        entry_id (str): The config entry ID.
-        force   (bool): Optional. If true, mark ALL slots on ALL locks
-                        dirty before pushing (full re-sync).
+    First-ever push per lock triggers full reconciliation automatically.
+    Subsequent pushes are incremental (only dirty slots).
 
     Requires an unlocked secure session when secure mode is active.
 
@@ -414,8 +412,7 @@ async def ws_push_all(
     if slot_manager is None:
         return
 
-    force = msg.get("force", False)
-    task = hass.async_create_task(slot_manager.async_push_all(force=force))
+    task = hass.async_create_task(slot_manager.async_push_all())
     slot_manager.register_push_task(task)
 
     connection.send_result(msg["id"], {"success": True})
@@ -498,7 +495,7 @@ async def ws_push_lock(
         return
 
     task = hass.async_create_task(
-        slot_manager.async_push_lock(lock_entity=lock_entity, force=True)
+        slot_manager.async_push_lock(lock_entity=lock_entity)
     )
     slot_manager.register_push_task(task)
 
@@ -593,6 +590,11 @@ async def ws_get_status(
 
     status = slot_manager.get_push_status()
 
+    # Add per-lock initial_push_done and total_slot_count to each lock status.
+    for lock_entity, lock_status in status.items():
+        lock_status["initial_push_done"] = slot_manager._store.is_initial_push_done(lock_entity)
+        lock_status["total_slot_count"] = slot_manager.get_lock_total_slots(lock_entity)
+
     connection.send_result(msg["id"], {
         "status": status,
         "active_push_lock": slot_manager.active_push_lock,
@@ -649,6 +651,7 @@ async def ws_get_config(
         CONF_CODE_LENGTH_1,
         CONF_CODE_LENGTH_2,
         CONF_PER_LOCK_CODE_LENGTH,
+        CONF_PER_LOCK_SLOT_COUNT,
         CONF_SLOT_COUNT,
         CONF_SECURE_MODE,
         CONF_LOCKOUT_ENABLED,

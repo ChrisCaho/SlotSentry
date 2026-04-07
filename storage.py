@@ -750,6 +750,24 @@ class SlotSentryStore:
         self._data["config"][key] = value
 
     # ------------------------------------------------------------------
+    # Initial push tracking
+    # ------------------------------------------------------------------
+
+    def is_initial_push_done(self, lock_entity: str) -> bool:
+        """Return True if a full reconciliation push has been done for this lock."""
+        self._require_loaded()
+        assert self._data is not None
+        return bool(self._data.get("initial_push_done", {}).get(lock_entity, False))
+
+    def set_initial_push_done(self, lock_entity: str, done: bool) -> None:
+        """Mark whether initial full push has been completed for a lock."""
+        self._require_loaded()
+        assert self._data is not None
+        if "initial_push_done" not in self._data:
+            self._data["initial_push_done"] = {}
+        self._data["initial_push_done"][lock_entity] = done
+
+    # ------------------------------------------------------------------
     # Latency profiles
     # ------------------------------------------------------------------
 
@@ -802,6 +820,7 @@ class SlotSentryStore:
             "code_length_mode": "dual",
             "slots": slots,
             "lock_commit": {},
+            "initial_push_done": {},
             "config": {
                 "dont_show_test_popup": False,
             },

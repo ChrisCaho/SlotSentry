@@ -47,7 +47,6 @@ class SlotSentryPanel extends HTMLElement {
     this._pushPollStart = 0;
     this._initStarted = false;
     this._renderScheduled = false;
-    this._updateAll = false;
     this._eventsBound = false;
     this._savingAll = false;
     this._nextToastId = 0;
@@ -411,13 +410,13 @@ class SlotSentryPanel extends HTMLElement {
   }
 
   async _saveAll() {
-    // Save every slot that has edits (or all if _updateAll)
+    // Save every slot that has edits
     const toSave = [];
     for (const slot of this._slots) {
       const n = slot.slot_number;
       const vals = this._editValues[n];
       if (!vals) continue;
-      if (this._updateAll || this._isRowDirty(slot)) {
+      if (this._isRowDirty(slot)) {
         toSave.push({ slot_number: n, ...vals });
       }
     }
@@ -452,7 +451,6 @@ class SlotSentryPanel extends HTMLElement {
 
     this._savingAll = false;
     this._pushProgress = "";
-    this._updateAll = false;
 
     if (failed) {
       this._toast("Saved " + saved + " slot(s), " + failed + " failed.", "error");
@@ -492,13 +490,11 @@ class SlotSentryPanel extends HTMLElement {
     // Flush all pending auto-save timers before pushing
     this._flushAllAutoSaveTimers();
     this._pushing = true;
-    const force = !!this._updateAll;
-    this._pushProgress = force ? "Force-pushing all slots to all locks\u2026" : "Pushing to all locks\u2026";
+    this._pushProgress = "Pushing to all locks\u2026";
     this._scheduleRender();
 
     try {
-      await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId, force });
-      if (force) this._updateAll = false;
+      await this._hass.callWS({ type: "slotsentry/push_all", entry_id: this._entryId });
       this._startPushPoll();
     } catch (err) {
       this._pushing = false;
@@ -807,10 +803,6 @@ class SlotSentryPanel extends HTMLElement {
         ${this._renderSlotTableHTML()}
 
         <div class="bottom-bar">
-          <label class="update-all-label">
-            <input type="checkbox" data-action="update-all" ${this._updateAll ? "checked" : ""} />
-            Update All Slots
-          </label>
           <div class="bottom-actions">
             <button class="btn btn-save-disk" data-action="save-all">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;"><path d="M17 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
@@ -1080,10 +1072,6 @@ class SlotSentryPanel extends HTMLElement {
       if (inp.dataset.slot && inp.dataset.field === "enabled") {
         this._onEnabledChange(parseInt(inp.dataset.slot, 10), inp.checked);
       }
-      if (inp.dataset.action === "update-all") {
-        this._updateAll = inp.checked;
-        this._scheduleRender();
-      }
     });
 
     // Blur events on input fields trigger auto-save debounce
@@ -1267,11 +1255,6 @@ class SlotSentryPanel extends HTMLElement {
         display: flex; align-items: center; justify-content: space-between;
         padding: 12px 0; margin-top: 8px;
       }
-      .update-all-label {
-        display: flex; align-items: center; gap: 8px;
-        font-size: 13px; cursor: pointer; color: var(--primary-text-color);
-      }
-      .update-all-label input { width: 16px; height: 16px; accent-color: var(--ss-accent); }
       .bottom-actions { display: flex; gap: 8px; }
 
       /* Lock status */
