@@ -395,7 +395,10 @@ class LockCommitMachine:
         for sn in sorted(slots.keys()):
             s = slots[sn]
             c = self._store.get_lock_commit(self._lock_entity, sn)
-            if force or self._slot_needs_sync(s, c):
+            if force or self._slot_needs_sync(
+                s, c, code_length_mode, code_length_1, code_length_2,
+                lock_code_length,
+            ):
                 slots_needing_push += 1
         # Phase 3: count unmanaged slots that will be cleared.
         unmanaged_count = 0
@@ -412,7 +415,10 @@ class LockCommitMachine:
 
                 # In force mode, push/clear every slot. Otherwise check sync.
                 if not force:
-                    needs_sync = self._slot_needs_sync(slot, commit)
+                    needs_sync = self._slot_needs_sync(
+                        slot, commit, code_length_mode, code_length_1,
+                        code_length_2, lock_code_length,
+                    )
                     if not needs_sync:
                         _LOGGER.debug(
                             "LockCommitMachine[%s]: slot %d already synced, skipping",
@@ -1140,10 +1146,22 @@ class LockCommitMachine:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _slot_needs_sync(self, slot: SlotData, commit: LockSlotCommit) -> bool:
+    def _slot_needs_sync(
+        self,
+        slot: SlotData,
+        commit: LockSlotCommit,
+        code_length_mode: str | None = None,
+        code_length_1: int | None = None,
+        code_length_2: int | None = None,
+        lock_code_length: int | None = None,
+    ) -> bool:
         """Return True if this slot requires a push to the lock.
 
         Disabled/empty slots that were previously pushed still need clearing.
+
+        When code length params are provided, uses _select_code_for_lock to
+        determine the correct code for hash comparison (fixes dual-mode locks
+        where code_1 vs code_2 differs per lock).
         """
         was_pushed = commit.pushed_at is not None
 
@@ -1161,7 +1179,16 @@ class LockCommitMachine:
         # A slot could be synced but then mutated without the commit state
         # being updated (e.g., a bug, or direct storage manipulation).
         if commit.code_hash is not None:
-            current_code = slot.get_active_code()
+            # Use _select_code_for_lock when code length params are available
+            # so we compare the same code that would actually be pushed to
+            # this lock (code_1 vs code_2 depends on per-lock code length).
+            if code_length_mode is not None:
+                current_code = self._select_code_for_lock(
+                    slot, code_length_mode, code_length_1, code_length_2,
+                    lock_code_length,
+                )
+            else:
+                current_code = slot.get_active_code()
             if current_code is not None:
                 if hash_code(current_code) != commit.code_hash:
                     _LOGGER.debug(
