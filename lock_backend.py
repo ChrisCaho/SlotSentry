@@ -833,18 +833,23 @@ class ZWaveJSBackend:
         return None
 
     async def async_ping(self) -> float | None:
-        """Ping the lock via zwave_js.ping and return round-trip seconds.
+        """Ping the lock via its button.press ping entity and return round-trip seconds.
+
+        Uses the ping button entity (button.<slug>_ping) instead of the deprecated
+        zwave_js.ping service.
 
         Returns:
             Measured latency in seconds, or None if unreachable/timeout.
         """
+        slug = self._entity_id.split(".", 1)[1]
+        ping_button = f"button.{slug}_ping"
         t0 = time.monotonic()
         try:
             async with asyncio.timeout(10.0):
                 await self._hass.services.async_call(
-                    ZWAVE_DOMAIN,
-                    "ping",
-                    {"entity_id": self._entity_id},
+                    "button",
+                    "press",
+                    {"entity_id": ping_button},
                     blocking=True,
                 )
         except (TimeoutError, Exception):  # noqa: BLE001
